@@ -1,35 +1,56 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+namespace
+{
+    struct UIScalePreset
+    {
+        int id;
+        const char* label;
+        float scale;
+    };
+
+    static constexpr std::array<UIScalePreset, 6> kUIScalePresets = {{
+        { 1, "UI: 50% Compact",   0.50f },
+        { 2, "UI: 60% Default",   0.60f },
+        { 3, "UI: 70% Medium",    0.70f },
+        { 4, "UI: 80% Large",     0.80f },
+        { 5, "UI: 100% Native",   1.00f },
+        { 6, "UI: 125% HiDPI",    1.25f }
+    }};
+}
+
 CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000AudioProcessor& p)
     : AudioProcessorEditor(&p),
       processorRef(p),
+      mainCanvas(*this),
       wavefolderScope(p),
       midiKeyboard(p.getKeyboardState(), juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     setLookAndFeel(&ctkLookAndFeel);
+    addAndMakeVisible(mainCanvas);
 
     auto& apvts = processorRef.getAPVTS();
 
     //==============================================================================
-    // 1. Top Console Bezel Setup
+    // 1. Top Console Bezel Setup (Added to mainCanvas)
     crossModeCombo.addItemList({ "Pure IXA", "Hybrid PCM + IXA", "Dual PCM" }, 1);
-    addAndMakeVisible(crossModeCombo);
+    mainCanvas.addAndMakeVisible(crossModeCombo);
     crossModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "CROSS_MODE", crossModeCombo);
 
     routingModeCombo.addItemList({ "Parallel Detuned", "2-Op Cascade (Op2->Op1)", "Single Op 1" }, 1);
-    addAndMakeVisible(routingModeCombo);
+    mainCanvas.addAndMakeVisible(routingModeCombo);
     routingModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "ROUTING_MODE", routingModeCombo);
 
     dac1993Button.setClickingTogglesState(true);
-    addAndMakeVisible(dac1993Button);
+    mainCanvas.addAndMakeVisible(dac1993Button);
     dac1993Attach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "HARDWARE_DAC_MODE", dac1993Button);
 
     adaaButton.setClickingTogglesState(true);
-    addAndMakeVisible(adaaButton);
+    mainCanvas.addAndMakeVisible(adaaButton);
     adaaAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "ADAA_ENABLE", adaaButton);
 
@@ -38,20 +59,38 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
 
     loadSa51FolderButton.getProperties().set("royalBlue", true);
     loadSa51FolderButton.onClick = [this] { openSampleFolderChooser(); };
-    addAndMakeVisible(loadSa51FolderButton);
+    mainCanvas.addAndMakeVisible(loadSa51FolderButton);
 
-    addAndMakeVisible(wavefolderScope);
+    // Quick-Scale Header Dropdown (50% to 125%)
+    for (const auto& preset : kUIScalePresets)
+        uiScaleBox.addItem(preset.label, preset.id);
+
+    uiScaleBox.onChange = [this]
+    {
+        const int selId = uiScaleBox.getSelectedId();
+        for (const auto& preset : kUIScalePresets)
+        {
+            if (preset.id == selId)
+            {
+                applyUIScaleFactor(preset.scale, true);
+                break;
+            }
+        }
+    };
+    mainCanvas.addAndMakeVisible(uiScaleBox);
+
+    mainCanvas.addAndMakeVisible(wavefolderScope);
 
     //==============================================================================
     // 2. Dual PCM Sample Slots Setup (Element A & Element B)
     auto setupPCMSlot = [&](PCMSlotControls& slot, const juce::String& prefix, bool isSlotA)
     {
         slot.enableBtn.setClickingTogglesState(true);
-        addAndMakeVisible(slot.enableBtn);
+        mainCanvas.addAndMakeVisible(slot.enableBtn);
         slot.enableAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, prefix + "ENABLE", slot.enableBtn);
 
-        addAndMakeVisible(slot.instrumentCombo);
+        mainCanvas.addAndMakeVisible(slot.instrumentCombo);
         slot.instrumentCombo.onChange = [this, isSlotA, &slot]
         {
             const int selIdx = slot.instrumentCombo.getSelectedItemIndex();
@@ -65,12 +104,12 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
         };
 
         slot.loopModeCombo.addItemList({ "One-Shot", "Forward Loop", "Ping-Pong (Pat.5,319,151)" }, 1);
-        addAndMakeVisible(slot.loopModeCombo);
+        mainCanvas.addAndMakeVisible(slot.loopModeCombo);
         slot.loopModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
             apvts, prefix + "LOOP_MODE", slot.loopModeCombo);
 
         slot.loopOverrideBtn.setClickingTogglesState(true);
-        addAndMakeVisible(slot.loopOverrideBtn);
+        mainCanvas.addAndMakeVisible(slot.loopOverrideBtn);
         slot.loopOverrideAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
             apvts, prefix + "LOOP_OVERRIDE", slot.loopOverrideBtn);
 
@@ -94,7 +133,7 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
     refreshInstrumentComboBoxes();
 
     //==============================================================================
-    // 3. Dual-Operator IXA Synthesis Engine Setup (Operators 1 & 2)
+    // 3. Dual-Operator IXA Synthesis Engine Setup (Operators 1 & 2) + 12dB LPF
     auto setupIXAOperator = [&](IXAOperatorControls& op, const juce::String& prefix)
     {
         initRotaryKnob(op.coarseRatio, prefix + "COARSE_RATIO",   "RATIO (r)");
@@ -128,7 +167,7 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
     // 4. Bottom-Left Panel — Legacy 1993 CTK-1000 Tone Editor Override
     legacyMacroEnableBtn.setClickingTogglesState(true);
     legacyMacroEnableBtn.getProperties().set("crimsonBtn", true);
-    addAndMakeVisible(legacyMacroEnableBtn);
+    mainCanvas.addAndMakeVisible(legacyMacroEnableBtn);
     legacyMacroEnableAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "LEGACY_MACRO_ENABLE", legacyMacroEnableBtn);
 
@@ -148,18 +187,18 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
         "7: Flanger",
         "8: Chorus Reverb"
     }, 1);
-    addAndMakeVisible(dspModeCombo);
+    mainCanvas.addAndMakeVisible(dspModeCombo);
     dspModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         apvts, "DSP_MODE", dspModeCombo);
 
     dspLofiPsramBtn.setClickingTogglesState(true);
-    addAndMakeVisible(dspLofiPsramBtn);
+    mainCanvas.addAndMakeVisible(dspLofiPsramBtn);
     dspLofiPsramAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "DSP_LOFI_PSRAM", dspLofiPsramBtn);
 
     dspBypassBtn.setClickingTogglesState(true);
     dspBypassBtn.getProperties().set("crimsonBtn", true);
-    addAndMakeVisible(dspBypassBtn);
+    mainCanvas.addAndMakeVisible(dspBypassBtn);
     dspBypassAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         apvts, "DSP_BYPASS", dspBypassBtn);
 
@@ -177,9 +216,25 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
     midiKeyboard.setColour(juce::MidiKeyboardComponent::keySeparatorLineColourId, juce::Colour(0xff3a3c40));
     midiKeyboard.setColour(juce::MidiKeyboardComponent::mouseOverKeyOverlayColourId, CasioIXA::CTK1000LookAndFeel::kVermilion.withAlpha(0.5f));
     midiKeyboard.setColour(juce::MidiKeyboardComponent::keyDownOverlayColourId, CasioIXA::CTK1000LookAndFeel::kVermilion);
-    addAndMakeVisible(midiKeyboard);
+    mainCanvas.addAndMakeVisible(midiKeyboard);
 
-    setSize(1180, 760);
+    // Enable native corner resizing with locked aspect ratio (45% to 135% of 1180 x 760)
+    mainCanvas.setBounds(0, 0, kBaseWidth, kBaseHeight);
+    setResizable(true, true);
+    if (auto* constrainer = getConstrainer())
+        constrainer->setFixedAspectRatio(static_cast<double>(kBaseWidth) / static_cast<double>(kBaseHeight));
+
+    setResizeLimits(static_cast<int>(kBaseWidth * 0.45f),
+                    static_cast<int>(kBaseHeight * 0.45f),
+                    static_cast<int>(kBaseWidth * 1.35f),
+                    static_cast<int>(kBaseHeight * 1.35f));
+
+    // Load saved UI scale factor from settings.xml (defaults to 0.60f = 708 x 456 for FL Studio)
+    const float initialScale = processorRef.getSampleBankManager().getSavedUIScale();
+    syncUIScaleComboBoxToFactor(initialScale);
+    applyUIScaleFactor(initialScale, false);
+    isInitializingSize = false;
+
     startTimerHz(30);
 }
 
@@ -187,6 +242,44 @@ CasioCTK1000AudioProcessorEditor::~CasioCTK1000AudioProcessorEditor()
 {
     stopTimer();
     setLookAndFeel(nullptr);
+}
+
+void CasioCTK1000AudioProcessorEditor::applyUIScaleFactor(float newScaleFactor, bool saveToPrefs)
+{
+    const float clamped = std::clamp(newScaleFactor, 0.45f, 1.35f);
+    const int targetW = juce::roundToInt(static_cast<float>(kBaseWidth) * clamped);
+    const int targetH = juce::roundToInt(static_cast<float>(kBaseHeight) * clamped);
+
+    setSize(targetW, targetH);
+
+    if (saveToPrefs)
+        processorRef.getSampleBankManager().saveUIScaleToProperties(clamped);
+}
+
+void CasioCTK1000AudioProcessorEditor::syncUIScaleComboBoxToFactor(float scaleFactor)
+{
+    int bestId = 0;
+    float minDiff = 100.0f;
+
+    for (const auto& preset : kUIScalePresets)
+    {
+        const float diff = std::abs(scaleFactor - preset.scale);
+        if (diff < minDiff)
+        {
+            minDiff = diff;
+            bestId = preset.id;
+        }
+    }
+
+    if (minDiff <= 0.025f && bestId > 0)
+    {
+        uiScaleBox.setSelectedId(bestId, juce::dontSendNotification);
+    }
+    else
+    {
+        const int pct = juce::roundToInt(scaleFactor * 100.0f);
+        uiScaleBox.setText("UI: " + juce::String(pct) + "%", juce::dontSendNotification);
+    }
 }
 
 void CasioCTK1000AudioProcessorEditor::initRotaryKnob(LabeledKnob& knob,
@@ -199,7 +292,7 @@ void CasioCTK1000AudioProcessorEditor::initRotaryKnob(LabeledKnob& knob,
     if (amberArc)
         knob.slider.getProperties().set("amberArc", true);
 
-    addAndMakeVisible(knob.slider);
+    mainCanvas.addAndMakeVisible(knob.slider);
 
     knob.label.setText(titleText, juce::dontSendNotification);
     knob.label.setJustificationType(juce::Justification::centred);
@@ -207,7 +300,7 @@ void CasioCTK1000AudioProcessorEditor::initRotaryKnob(LabeledKnob& knob,
                          amberArc ? CasioIXA::CTK1000LookAndFeel::kAmberGold
                                   : CasioIXA::CTK1000LookAndFeel::kOffWhite);
     knob.label.setFont(CasioIXA::CTK1000LookAndFeel::makeFont(9.5f, true, false));
-    addAndMakeVisible(knob.label);
+    mainCanvas.addAndMakeVisible(knob.label);
 
     knob.attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processorRef.getAPVTS(), paramID, knob.slider);
@@ -259,7 +352,7 @@ void CasioCTK1000AudioProcessorEditor::openSampleFolderChooser()
             if (processorRef.loadSampleFolder(chosen))
             {
                 refreshInstrumentComboBoxes();
-                repaint();
+                mainCanvas.repaint();
             }
         }
     });
@@ -321,9 +414,9 @@ void CasioCTK1000AudioProcessorEditor::timerCallback()
     if (pcmSlotB.instrumentCombo.getSelectedItemIndex() != hostIdxB)
         pcmSlotB.instrumentCombo.setSelectedItemIndex(hostIdxB, juce::dontSendNotification);
 
-    repaint(centerLedWindowBounds);
-    repaint(legacyLedReadoutBounds);
-    repaint(dspLedMatrixBounds);
+    mainCanvas.repaint(centerLedWindowBounds);
+    mainCanvas.repaint(legacyLedReadoutBounds);
+    mainCanvas.repaint(dspLedMatrixBounds);
 }
 
 void CasioCTK1000AudioProcessorEditor::drawHardwareSectionFrame(juce::Graphics& g,
@@ -386,6 +479,27 @@ void CasioCTK1000AudioProcessorEditor::drawSevenSegmentDisplayBezel(juce::Graphi
 
 void CasioCTK1000AudioProcessorEditor::paint(juce::Graphics& g)
 {
+    g.fillAll(CasioIXA::CTK1000LookAndFeel::kChassisBlack);
+}
+
+void CasioCTK1000AudioProcessorEditor::resized()
+{
+    const float scaleX = static_cast<float>(getWidth())  / static_cast<float>(kBaseWidth);
+    const float scaleY = static_cast<float>(getHeight()) / static_cast<float>(kBaseHeight);
+    const float scale  = std::min(scaleX, scaleY);
+
+    mainCanvas.setTransform(juce::AffineTransform::scale(scale));
+    mainCanvas.setBounds(0, 0, kBaseWidth, kBaseHeight);
+
+    if (!isInitializingSize)
+    {
+        syncUIScaleComboBoxToFactor(scale);
+        processorRef.getSampleBankManager().saveUIScaleToProperties(scale);
+    }
+}
+
+void CasioCTK1000AudioProcessorEditor::paintCanvas(juce::Graphics& g)
+{
     // 1. Matte dark charcoal-black outer chassis (#1B1C1E)
     g.fillAll(CasioIXA::CTK1000LookAndFeel::kChassisBlack);
 
@@ -395,8 +509,8 @@ void CasioCTK1000AudioProcessorEditor::paint(juce::Graphics& g)
     {
         const float offset = static_cast<float>(i * 7);
         g.drawLine(6.0f + offset, 4.0f, 2.0f + offset, 26.0f, 2.0f);
-        g.drawLine(static_cast<float>(getWidth()) - 98.0f + offset, 4.0f,
-                   static_cast<float>(getWidth()) - 102.0f + offset, 26.0f, 2.0f);
+        g.drawLine(static_cast<float>(kBaseWidth) - 98.0f + offset, 4.0f,
+                   static_cast<float>(kBaseWidth) - 102.0f + offset, 26.0f, 2.0f);
     }
 
     // 2. Top Center Console Bezel Frame
@@ -533,9 +647,9 @@ void CasioCTK1000AudioProcessorEditor::paint(juce::Graphics& g)
     }
 }
 
-void CasioCTK1000AudioProcessorEditor::resized()
+void CasioCTK1000AudioProcessorEditor::layoutCanvas()
 {
-    auto fullArea = getLocalBounds().reduced(8, 6);
+    auto fullArea = juce::Rectangle<int>(0, 0, kBaseWidth, kBaseHeight).reduced(8, 6);
 
     // Bottom MIDI Keyboard Strip (48 px) — dynamically sized so 36 white keys (36..96) fill 100% width
     auto keyboardArea = fullArea.removeFromBottom(48);
@@ -555,10 +669,12 @@ void CasioCTK1000AudioProcessorEditor::resized()
         wavefolderScope.setBounds(scopeRect);
         innerTop.removeFromRight(8);
 
-        // Bottom row inside Top Bezel: SA-51 Folder Loader Button + Red LED Path Readout
+        // Bottom row inside Top Bezel: SA-51 Folder Loader Button + Red LED Path Readout + UI Scale Selector
         auto loaderRow = innerTop.removeFromBottom(24);
         loadSa51FolderButton.setBounds(loaderRow.removeFromLeft(215));
         loaderRow.removeFromLeft(8);
+        uiScaleBox.setBounds(loaderRow.removeFromRight(138));
+        loaderRow.removeFromRight(8);
         sa51PathLedBounds = loaderRow;
 
         innerTop.removeFromBottom(4);
@@ -591,7 +707,7 @@ void CasioCTK1000AudioProcessorEditor::resized()
     auto bottomPanelsArea = fullArea.removeFromBottom(142);
     fullArea.removeFromBottom(6);
 
-    // Middle Workstation Area: Left Column = Dual PCM Slots (430 px), Right Column = Dual IXA Operators
+    // Middle Workstation Area: Left Column = Dual PCM Slots (430 px), Right Column = Dual IXA Operators + 12dB LPF
     auto pcmColumn = fullArea.removeFromLeft(430);
     fullArea.removeFromLeft(8);
     auto ixaColumn = fullArea;
