@@ -104,9 +104,6 @@ public:
         const float radius = std::min(bounds.getWidth(), bounds.getHeight()) * 0.5f;
         const float cx = bounds.getCentreX();
         const float cy = bounds.getCentreY();
-        const float rx = cx - radius;
-        const float ry = cy - radius;
-        const float rw = radius * 2.0f;
         const float angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
 
         // Recessed outer track arc
@@ -115,7 +112,7 @@ public:
         g.setColour(kRecessedBlack);
         g.strokePath(bgArc, juce::PathStrokeType(3.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-        // Active Vermilion (#E84A27) value arc
+        // Active Vermilion (#E84A27) or Amber-Gold value arc
         juce::Path valArc;
         valArc.addCentredArc(cx, cy, radius * 0.88f, radius * 0.88f, 0.0f, rotaryStartAngle, angle, true);
         const bool isAccent = slider.getProperties().contains("amberArc");
@@ -136,8 +133,6 @@ public:
         pointer.applyTransform(juce::AffineTransform::rotation(angle).translated(cx, cy));
         g.setColour(kOffWhite);
         g.fillPath(pointer);
-
-        juce::ignoreUnused(rx, ry, rw);
     }
 
     void drawButtonBackground(juce::Graphics& g,
@@ -237,7 +232,7 @@ public:
 /**
  * Live IXA Wavefolder Transfer & Real-Time Audio Oscilloscope Display
  * Plots the exact analytical US Patent 5,164,530 wavefolder cycle Delta(W_alpha(phi) + n sin(2*pi*r*phi))
- * superimposed with live audio output from the processor's lock-free ring buffer.
+ * with 2-pole Butterworth LPF corner-rounding preview and superimposed live audio output.
  */
 class IXAWavefolderScopeComponent : public juce::Component
 {
@@ -407,16 +402,22 @@ class CasioCTK1000AudioProcessorEditor : public juce::AudioProcessorEditor,
                                          private juce::Timer
 {
 public:
+    static constexpr int kBaseWidth  = 1180;
+    static constexpr int kBaseHeight = 760;
+
     explicit CasioCTK1000AudioProcessorEditor(CasioCTK1000AudioProcessor&);
     ~CasioCTK1000AudioProcessorEditor() override;
 
     void paint(juce::Graphics&) override;
     void resized() override;
 
+    void applyUIScaleFactor(float newScaleFactor, bool saveToPrefs);
+
 private:
     void timerCallback() override;
     void openSampleFolderChooser();
     void refreshInstrumentComboBoxes();
+    void syncUIScaleComboBoxToFactor(float scaleFactor);
 
     struct LabeledKnob
     {
@@ -444,8 +445,28 @@ private:
                                              const juce::String& mainReadout,
                                              const juce::String& subReadout);
 
+    /**
+     * Inner Fixed-Coordinate Canvas (1180 x 760)
+     * Holds all child controls and custom hardware silkscreen/LED rendering at 1:1 native coordinates,
+     * while CasioCTK1000AudioProcessorEditor scales it smoothly via juce::AffineTransform::scale().
+     */
+    class MainCanvasComponent : public juce::Component
+    {
+    public:
+        explicit MainCanvasComponent(CasioCTK1000AudioProcessorEditor& ed) : owner(ed) {}
+        void paint(juce::Graphics& g) override { owner.paintCanvas(g); }
+        void resized() override { owner.layoutCanvas(); }
+    private:
+        CasioCTK1000AudioProcessorEditor& owner;
+    };
+
+    void paintCanvas(juce::Graphics& g);
+    void layoutCanvas();
+
     CasioCTK1000AudioProcessor& processorRef;
     CasioIXA::CTK1000LookAndFeel ctkLookAndFeel;
+    MainCanvasComponent mainCanvas;
+    bool isInitializingSize = true;
 
     //==============================================================================
     // 1. Top Center Console Bezel Controls
@@ -465,6 +486,7 @@ private:
     LabeledKnob masterGainKnob;
 
     juce::TextButton loadSa51FolderButton { "SELECT SA-51 WAV FOLDER..." };
+    juce::ComboBox uiScaleBox;
     std::unique_ptr<juce::FileChooser> activeFileChooser;
     juce::String sampleBankStatusText;
 
@@ -492,7 +514,7 @@ private:
     PCMSlotControls pcmSlotB;
 
     //==============================================================================
-    // 3. Center Panel — Dual-Operator IXA Synthesis Engine (Operators 1 & 2)
+    // 3. Center Panel — Dual-Operator IXA Synthesis Engine (Operators 1 & 2) + 12dB LPF
     struct IXAOperatorControls
     {
         LabeledKnob coarseRatio, fineDetune, baseIndex, envDepth, velDepth, carrierWarp, feedback, level;
@@ -503,7 +525,6 @@ private:
     IXAOperatorControls op1Controls;
     IXAOperatorControls op2Controls;
 
-    // Phase 4: Per-Voice 12 dB/oct Non-Resonant IXA Lowpass Filter Controls
     LabeledKnob ixaLpfCutoffKnob;
     LabeledKnob ixaLpfEnvKnob;
     LabeledKnob ixaLpfKeyTrackKnob;
@@ -536,7 +557,7 @@ private:
     // On-screen interactive MIDI keyboard strip at the bottom edge
     juce::MidiKeyboardComponent midiKeyboard;
 
-    // Cached layout rectangles for custom hardware silkscreen & LED rendering
+    // Cached layout rectangles inside mainCanvas (1180 x 760 coordinate space)
     juce::Rectangle<int> topBezelBounds;
     juce::Rectangle<int> centerLedWindowBounds;
     juce::Rectangle<int> sa51PathLedBounds;
