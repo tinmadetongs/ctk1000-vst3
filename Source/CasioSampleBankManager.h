@@ -360,6 +360,26 @@ public:
         return currentDirectory.getFullPathName();
     }
 
+    float getSavedUIScale() const
+    {
+        if (auto* props = const_cast<juce::ApplicationProperties&>(appProperties).getUserSettings())
+        {
+            const double val = props->getDoubleValue("UIScaleFactor", 0.60);
+            return static_cast<float>(std::clamp(val, 0.45, 1.35));
+        }
+        return 0.60f;
+    }
+
+    void saveUIScaleToProperties(float scaleFactor)
+    {
+        const double clamped = std::clamp(static_cast<double>(scaleFactor), 0.45, 1.35);
+        if (auto* props = appProperties.getUserSettings())
+        {
+            props->setValue("UIScaleFactor", clamped);
+            props->saveIfNeeded();
+        }
+    }
+
     juce::File getCurrentDirectory() const
     {
         const juce::ScopedLock sl(bankLock);
