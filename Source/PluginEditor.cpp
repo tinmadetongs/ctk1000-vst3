@@ -252,6 +252,30 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
     setupLFOGroup(lfo1Controls, "LFO1_");
     setupLFOGroup(lfo2Controls, "LFO2_");
 
+    //==============================================================================
+    // 7. Phase 6.5: SA / PSS Fake Sustain & Envelope Reverb Setup
+    fakeSusModeCombo.addItemList({
+        "Off (Std ADSR)",
+        "SA-Series Sustain",
+        "PSS-480 Fake Reverb",
+        "8-Bit Stepped Echo"
+    }, 1);
+    mainCanvas.addAndMakeVisible(fakeSusModeCombo);
+    fakeSusModeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, "FAKE_SUS_MODE", fakeSusModeCombo);
+
+    fakeSusRoutingCombo.addItemList({
+        "All Layers (Global)",
+        "IXA Synth Only",
+        "PCM Elements Only"
+    }, 1);
+    mainCanvas.addAndMakeVisible(fakeSusRoutingCombo);
+    fakeSusRoutingAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        apvts, "FAKE_SUS_ROUTING", fakeSusRoutingCombo);
+
+    initRotaryKnob(fakeSusTimeKnob,  "FAKE_SUS_TIME",  "TAIL TIME", false);
+    initRotaryKnob(fakeSusCurveKnob, "FAKE_SUS_CURVE", "SHELF/CRV", true);
+
     // Configure MIDI keyboard colors to match CTK-1000 hardware (36..96 = 36 white keys)
     midiKeyboard.setAvailableRange(36, 96);
     midiKeyboard.setScrollButtonsVisible(false);
@@ -470,6 +494,7 @@ void CasioCTK1000AudioProcessorEditor::timerCallback()
     mainCanvas.repaint(dspLedMatrixBounds);
     mainCanvas.repaint(lfo1Bounds.withHeight(22));
     mainCanvas.repaint(lfo2Bounds.withHeight(22));
+    mainCanvas.repaint(fakeSusBounds.withHeight(22));
 }
 
 void CasioCTK1000AudioProcessorEditor::drawHardwareSectionFrame(juce::Graphics& g,
@@ -699,9 +724,10 @@ void CasioCTK1000AudioProcessorEditor::paintCanvas(juce::Graphics& g)
         }
     }
 
-    // 7. Phase 6: Dual Assignable Multi-Target LFO Panels with Live Pulsing Rate LEDs
-    drawHardwareSectionFrame(g, lfo1Bounds, "MODULATION LFO 1 (CC#1 MOD WHEEL + DELAYED VIBRATO / MULTI-TARGET)");
-    drawHardwareSectionFrame(g, lfo2Bounds, "MODULATION LFO 2 (AUXILIARY WAVEFOLDER / FILTER / PCM CROSSFADE LFO)");
+    // 7. Phase 6 & 6.5: Dual LFO Panels + SA / PSS Envelope Sustain & Fake Reverb Panel
+    drawHardwareSectionFrame(g, lfo1Bounds, "MODULATION LFO 1 (CC#1 + MULTI-TARGET)");
+    drawHardwareSectionFrame(g, lfo2Bounds, "MODULATION LFO 2 (AUX WAVEFOLDER / FILTER)");
+    drawHardwareSectionFrame(g, fakeSusBounds, "SA / PSS ENVELOPE SUSTAIN & FAKE REVERB");
 
     auto drawPulsingLfoHeaderLed = [&](juce::Rectangle<int> boxBounds, double phase, const juce::String& prefix)
     {
@@ -733,6 +759,31 @@ void CasioCTK1000AudioProcessorEditor::paintCanvas(juce::Graphics& g)
 
     drawPulsingLfoHeaderLed(lfo1Bounds, guiLfo1Phase, "LFO1_");
     drawPulsingLfoHeaderLed(lfo2Bounds, guiLfo2Phase, "LFO2_");
+
+    // Draw glowing red hardware LED indicator on SA / PSS Fake Sustain panel when Mode > 0
+    {
+        const int fakeMode = static_cast<int>(processorRef.getAPVTS().getRawParameterValue("FAKE_SUS_MODE")->load());
+        const bool fakeOn = (fakeMode > 0);
+        const float ledR = 4.2f;
+        const float ledX = static_cast<float>(fakeSusBounds.getRight() - 18);
+        const float ledY = static_cast<float>(fakeSusBounds.getY() + 10) - ledR;
+
+        g.setColour(CasioIXA::CTK1000LookAndFeel::kLedBezelDark);
+        g.fillEllipse(ledX - 1.0f, ledY - 1.0f, (ledR + 1.0f) * 2.0f, (ledR + 1.0f) * 2.0f);
+
+        if (fakeOn)
+        {
+            g.setColour(CasioIXA::CTK1000LookAndFeel::kLedCrimson.withAlpha(0.40f));
+            g.fillEllipse(ledX - 2.5f, ledY - 2.5f, (ledR + 2.5f) * 2.0f, (ledR + 2.5f) * 2.0f);
+            g.setColour(CasioIXA::CTK1000LookAndFeel::kLedCrimson);
+            g.fillEllipse(ledX, ledY, ledR * 2.0f, ledR * 2.0f);
+        }
+        else
+        {
+            g.setColour(juce::Colour(0xff4a1212));
+            g.fillEllipse(ledX, ledY, ledR * 2.0f, ledR * 2.0f);
+        }
+    }
 }
 
 void CasioCTK1000AudioProcessorEditor::layoutCanvas()
@@ -910,30 +961,45 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
     }
 
     //==============================================================================
-    // 6. Layout Phase 6 Dual Assignable Multi-Target LFO Strip (LFO 1 Left, LFO 2 Right)
-    const int halfLfoW = (lfoRowArea.getWidth() - 8) / 2;
-    lfo1Bounds = lfoRowArea.removeFromLeft(halfLfoW);
+    // 6. Layout Phase 6 & 6.5 Strip: LFO 1 (405 px) | LFO 2 (405 px) | SA/PSS Fake Sustain (338 px)
+    lfo1Bounds = lfoRowArea.removeFromLeft(405);
     lfoRowArea.removeFromLeft(8);
-    lfo2Bounds = lfoRowArea;
+    lfo2Bounds = lfoRowArea.removeFromLeft(405);
+    lfoRowArea.removeFromLeft(8);
+    fakeSusBounds = lfoRowArea;
 
     auto layoutLFOBox = [](LFOControlGroup& lfo, juce::Rectangle<int> bounds)
     {
         auto inner = bounds.reduced(8, 4);
         inner.removeFromTop(18); // Header bar clearance
 
-        auto leftSelectors = inner.removeFromLeft(275);
+        auto leftSelectors = inner.removeFromLeft(205);
         auto row1 = leftSelectors.removeFromTop(26);
-        lfo.waveCombo.setBounds(row1.removeFromLeft(165));
-        row1.removeFromLeft(6);
+        lfo.waveCombo.setBounds(row1.removeFromLeft(116));
+        row1.removeFromLeft(5);
         lfo.syncBtn.setBounds(row1);
 
         leftSelectors.removeFromTop(6);
         lfo.targetCombo.setBounds(leftSelectors.removeFromTop(26));
 
-        inner.removeFromLeft(10);
+        inner.removeFromLeft(6);
         layoutKnobGrid({ &lfo.rateKnob, &lfo.delayKnob, &lfo.depthKnob }, inner, 3);
     };
 
     layoutLFOBox(lfo1Controls, lfo1Bounds);
     layoutLFOBox(lfo2Controls, lfo2Bounds);
+
+    // Layout SA / PSS Envelope Sustain & Fake Reverb Box
+    {
+        auto inner = fakeSusBounds.reduced(8, 4);
+        inner.removeFromTop(18); // Header bar clearance
+
+        auto leftCombos = inner.removeFromLeft(182);
+        fakeSusModeCombo.setBounds(leftCombos.removeFromTop(26));
+        leftCombos.removeFromTop(6);
+        fakeSusRoutingCombo.setBounds(leftCombos.removeFromTop(26));
+
+        inner.removeFromLeft(6);
+        layoutKnobGrid({ &fakeSusTimeKnob, &fakeSusCurveKnob }, inner, 2);
+    }
 }
