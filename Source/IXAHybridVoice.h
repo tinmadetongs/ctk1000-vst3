@@ -51,6 +51,173 @@ struct LfoParameters
     bool keySync         = true;
 };
 
+//==============================================================================
+// Phase 6.5: Casio SA-Series / Yamaha Portasound "Fake Sustain & Envelope Reverb"
+enum class FakeSustainMode : int
+{
+    Off                = 0, // Standard juce::ADSR linear release
+    SASeriesConcave    = 1, // Sharp concave exponential decay E_rel(t) = exp((-t / tau)^p)
+    PSS480ReverbShelf  = 2, // 2-Stage Shelf: 45 ms drop to L_shelf, then exponential tail
+    Stepped8BitEcho    = 3  // 2-Stage Shelf quantized to 64 digital steps + 12 Hz VCA clock hold
+};
+
+enum class FakeSustainRouting : int
+{
+    GlobalAllLayers = 0,
+    IxaSynthOnly    = 1,
+    PcmElementsOnly = 2
+};
+
+struct FakeSustainParameters
+{
+    FakeSustainMode mode       = FakeSustainMode::Off;
+    FakeSustainRouting routing = FakeSustainRouting::GlobalAllLayers;
+    float tailTimeSec          = 1.80f; // [0.20 s, 6.00 s]
+    float curveOrShelf         = 0.30f; // [0.05, 0.85]
+};
+
+/**
+ * Dual-Slope Concave "Fake Sustain / Envelope Reverb" Post-Processor
+ * Replaces standard linear ADSR release upon key-up (`noteOff`) with authentic
+ * late-80s / early-90s Casio SA-series and Yamaha PSS-480 digital VCA release contours.
+ */
+class FakeSustainEnvelopeProcessor
+{
+public:
+    void prepare(double newSampleRate) noexcept
+    {
+        sampleRate = (newSampleRate > 0.0) ? newSampleRate : 44100.0;
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        inRelease = false;
+        isFinished = false;
+        releaseTimeSec = 0.0;
+        currentGain = 1.0f;
+        steppedHoldPhase = 0.0;
+        heldSteppedGain = 1.0f;
+    }
+
+    void noteOn() noexcept
+    {
+        inRelease = false;
+        isFinished = false;
+        releaseTimeSec = 0.0;
+        currentGain = 1.0f;
+        steppedHoldPhase = 0.0;
+        heldSteppedGain = 1.0f;
+    }
+
+    void noteOff() noexcept
+    {
+        if (!inRelease)
+        {
+            inRelease = true;
+            releaseTimeSec = 0.0;
+            steppedHoldPhase = 0.0;
+            heldSteppedGain = currentGain;
+        }
+    }
+
+    bool isReleasing() const noexcept { return inRelease; }
+    bool hasFinished() const noexcept { return isFinished; }
+
+    float processSample(const FakeSustainParameters& params) noexcept
+    {
+        if (params.mode == FakeSustainMode::Off)
+            return 1.0f;
+
+        if (!inRelease)
+        {
+            currentGain = 1.0f;
+            return 1.0f;
+        }
+
+        if (isFinished)
+            return 0.0f;
+
+        const double dt = 1.0 / sampleRate;
+        releaseTimeSec += dt;
+
+        const double tailSec = std::clamp(static_cast<double>(params.tailTimeSec), 0.20, 6.00);
+        const double curveParam = std::clamp(static_cast<double>(params.curveOrShelf), 0.05, 0.85);
+
+        double env = 0.0;
+
+        if (params.mode == FakeSustainMode::SASeriesConcave)
+        {
+            // Mode 1: Sharp concave exponential decay
+            // Higher curveParam produces a steeper initial drop followed by a lingering tail.
+            const double p = 0.42 + 0.58 * (1.0 - curveParam); // p in [0.45, 0.97] for stretched concave exp
+            const double tau = tailSec * (0.18 + 0.35 * (1.0 - curveParam));
+            const double normT = releaseTimeSec / std::max(0.02, tau);
+            // Combine fast initial concave drop with exponential tail:
+            const double fastDrop = std::exp(-releaseTimeSec / std::max(0.015, 0.06 * (1.0 - 0.7 * curveParam)));
+            const double slowTail = std::exp(-std::pow(normT, p));
+            const double shelfWeight = 0.15 + 0.55 * (1.0 - curveParam);
+            env = (1.0 - shelfWeight) * fastDrop + shelfWeight * slowTail;
+        }
+        else
+        {
+            // Modes 2 & 3: PSS-480 2-Stage Reverb Shelf
+            // Stage 1: Rapid drop over ~45 ms from 1.0 down to adjustable Reverb Shelf Level L_shelf in [0.10, 0.55]
+            const double shelfLevel = 0.08 + 0.52 * curveParam;
+            static constexpr double kStage1DropSec = 0.045;
+
+            if (releaseTimeSec < kStage1DropSec)
+            {
+                const double alpha = releaseTimeSec / kStage1DropSec;
+                // Smooth concave curve from 1.0 down to shelfLevel
+                const double shapedAlpha = 1.0 - (1.0 - alpha) * (1.0 - alpha);
+                env = 1.0 - shapedAlpha * (1.0 - shelfLevel);
+            }
+            else
+            {
+                // Stage 2: Exponential room-reverb tail from shelfLevel down to 0
+                const double tailElapsed = releaseTimeSec - kStage1DropSec;
+                // Decay time constant tau so tail reaches -60 dB around tailSec
+                const double tau = tailSec / 5.2;
+                env = shelfLevel * std::exp(-tailElapsed / std::max(0.03, tau));
+            }
+
+            if (params.mode == FakeSustainMode::Stepped8BitEcho)
+            {
+                // Mode 3: Quantize to 64 discrete digital VCA attenuation steps with 12 Hz envelope clock hold
+                // (emulating late-80s Casio SA-1 / Yamaha Portasound stepped digital VCA zipper tail)
+                static constexpr double kEnvClockHz = 28.0; // Stepped hardware envelope tick rate
+                steppedHoldPhase += kEnvClockHz * dt;
+                if (steppedHoldPhase >= 1.0)
+                {
+                    steppedHoldPhase -= std::floor(steppedHoldPhase);
+                    const double quantized = std::floor(env * 64.0) / 64.0;
+                    heldSteppedGain = static_cast<float>(quantized);
+                }
+                env = static_cast<double>(heldSteppedGain);
+            }
+        }
+
+        currentGain = static_cast<float>(std::clamp(env, 0.0, 1.0));
+        if (currentGain < 0.0005f || releaseTimeSec > (tailSec * 1.65 + 0.25))
+        {
+            currentGain = 0.0f;
+            isFinished = true;
+        }
+
+        return currentGain;
+    }
+
+private:
+    double sampleRate = 44100.0;
+    bool inRelease = false;
+    bool isFinished = false;
+    double releaseTimeSec = 0.0;
+    float currentGain = 1.0f;
+    double steppedHoldPhase = 0.0;
+    float heldSteppedGain = 1.0f;
+};
+
 /**
  * Per-Voice Multi-Waveform LFO Generator with Smooth Fade-In Delay Envelope
  * and deterministic xorshift32 Sample & Hold latch.
@@ -86,16 +253,11 @@ public:
         delayEnv = (delaySeconds <= 0.001f) ? 1.0 : 0.0;
     }
 
-    /**
-     * Advances the LFO by `numSamples` steps and returns the delayed, depth-scaled
-     * modulation signal in [-1.0, +1.0] (or slightly beyond if CC#1 boosts LFO 1).
-     */
     double advance(const LfoParameters& params, int numSamples, double extraDepth = 0.0) noexcept
     {
         const double totalDepth = std::clamp(static_cast<double>(params.depth) + extraDepth, -1.0, 1.0);
         const double dt = static_cast<double>(numSamples) / sampleRate;
 
-        // Advance fade-in delay ramp envelope E_delay[k] in [0, 1]
         if (params.delaySec <= 0.001f)
         {
             delayEnv = 1.0;
@@ -105,7 +267,6 @@ public:
             delayEnv = std::min(1.0, delayEnv + dt / static_cast<double>(params.delaySec));
         }
 
-        // Advance normalized phase in [0, 1)
         const double freq = std::clamp(static_cast<double>(params.rateHz), 0.05, 30.0);
         const double prevPhase = phase;
         phase += freq * dt;
@@ -126,7 +287,6 @@ public:
         {
             case LfoWaveform::Triangle:
             {
-                // Authentic Casio 6-bit stepped digital triangle LFO
                 const double quantizedPhase = std::floor(phase * 64.0) / 64.0;
                 rawWave = 1.0 - 4.0 * std::abs(quantizedPhase - 0.5);
                 break;
@@ -211,6 +371,9 @@ struct IXAVoiceParameters
     LfoParameters lfo1;
     LfoParameters lfo2;
 
+    // Phase 6.5: SA-Series / PSS-480 Fake Sustain & Envelope Reverb Parameters
+    FakeSustainParameters fakeSustain;
+
     IXAOscillator::Parameters op1Params;
     juce::ADSR::Parameters op1ModEnv { 0.005f, 0.35f, 0.2f, 0.25f };
     juce::ADSR::Parameters op1AmpEnv { 0.005f, 0.40f, 0.7f, 0.25f };
@@ -223,7 +386,6 @@ struct IXAVoiceParameters
 /**
  * 2-Pole (12 dB/octave) Zero-Delay-Feedback (ZDF) Trapezoidal State Variable Lowpass Filter
  * Locked to Butterworth non-resonant damping Q = 1/sqrt(2) (~0.70710678), R2 = 2*R = sqrt(2) (~1.41421356).
- * Guarantees zero zipper noise or instability under fast envelope and velocity modulation.
  */
 class IXAZdfButterworthLPF
 {
@@ -258,7 +420,7 @@ public:
         const double v2 = ic2eq + a2 * ic1eq + a3 * v3;
         ic1eq = 2.0 * v1 - ic1eq;
         ic2eq = 2.0 * v2 - ic2eq;
-        return v2; // 12 dB/octave lowpass output
+        return v2;
     }
 
 private:
@@ -272,7 +434,8 @@ private:
 
 /**
  * Dual-Element Algorithmic PCM Playback Head (US Patent 5,319,151)
- * Supports One-Shot, Forward Loop, and Bidirectional Ping-Pong Loop with Linear interpolation.
+ * Supports One-Shot, Forward Loop, and Bidirectional Ping-Pong Loop with Linear interpolation,
+ * plus optional Fake Sustain post-noteOff envelope hold.
  */
 class PCMSampleElementPlayer
 {
@@ -290,6 +453,8 @@ public:
         readPosition = 0.0;
         direction = 1;
         isPlaying = false;
+        holdingForFakeSustain = false;
+        heldEnvValue = 0.0f;
         ampEnv.reset();
     }
 
@@ -302,6 +467,8 @@ public:
         playedMidiNote = midiNoteNumber;
         noteVelocity = std::clamp(velocity, 0.0f, 1.0f);
         ampEnv.setParameters(params.ampEnvParams);
+        holdingForFakeSustain = false;
+        heldEnvValue = 0.0f;
 
         if (activeZone == nullptr || activeZone->audioData.getNumSamples() <= 1)
         {
@@ -315,14 +482,18 @@ public:
         ampEnv.noteOn();
     }
 
-    void stopNote(bool allowTailOff) noexcept
+    void stopNote(bool allowTailOff, bool holdForFakeSustain = false) noexcept
     {
         if (allowTailOff)
         {
-            ampEnv.noteOff();
+            if (holdForFakeSustain && isPlaying)
+                holdingForFakeSustain = true;
+            else
+                ampEnv.noteOff();
         }
         else
         {
+            holdingForFakeSustain = false;
             ampEnv.reset();
             isPlaying = false;
         }
@@ -330,7 +501,7 @@ public:
 
     bool isActive() const noexcept
     {
-        return isPlaying && ampEnv.isActive();
+        return isPlaying && (holdingForFakeSustain || ampEnv.isActive());
     }
 
     void renderNextSample(const PCMSlotParameters& params,
@@ -342,9 +513,9 @@ public:
         outLeft = 0.0f;
         outRight = 0.0f;
 
-        if (!params.enabled || !isPlaying || activeZone == nullptr || !ampEnv.isActive())
+        if (!params.enabled || !isPlaying || activeZone == nullptr || (!holdingForFakeSustain && !ampEnv.isActive()))
         {
-            if (!ampEnv.isActive())
+            if (!holdingForFakeSustain && !ampEnv.isActive())
                 isPlaying = false;
             return;
         }
@@ -356,11 +527,20 @@ public:
             return;
         }
 
-        const float envVal = ampEnv.getNextSample();
-        if (!ampEnv.isActive())
+        float envVal = 0.0f;
+        if (holdingForFakeSustain)
         {
-            isPlaying = false;
-            return;
+            envVal = heldEnvValue;
+        }
+        else
+        {
+            envVal = ampEnv.getNextSample();
+            heldEnvValue = envVal;
+            if (!ampEnv.isActive())
+            {
+                isPlaying = false;
+                return;
+            }
         }
 
         // Compute loop boundaries in samples
@@ -412,6 +592,7 @@ public:
             if (readPosition >= static_cast<double>(totalSamples - 1))
             {
                 isPlaying = false;
+                holdingForFakeSustain = false;
                 ampEnv.reset();
             }
         }
@@ -465,6 +646,8 @@ private:
     double readPosition = 0.0;
     int direction = 1;
     bool isPlaying = false;
+    bool holdingForFakeSustain = false;
+    float heldEnvValue = 0.0f;
     juce::ADSR ampEnv;
 };
 
@@ -482,7 +665,8 @@ public:
 /**
  * IXAHybridVoice
  * Combines Dual PCM Sample Elements (Slot A & Slot B) with Dual-Operator IXA Triangular Wave Modulation,
- * Per-Voice 12 dB/oct ZDF Butterworth Lowpass Filter, and Dual Assignable Multi-Target LFOs (LFO 1 & LFO 2).
+ * Per-Voice 12 dB/oct ZDF Butterworth Lowpass Filter, Dual Assignable Multi-Target LFOs (LFO 1 & LFO 2),
+ * and Phase 6.5 Casio SA / Yamaha PSS Fake Sustain & Envelope Reverb.
  */
 class IXAHybridVoice : public juce::SynthesiserVoice
 {
@@ -509,6 +693,7 @@ public:
         ixaLowpassFilter.prepare(sampleRate);
         lfo1Gen.prepare(sampleRate);
         lfo2Gen.prepare(sampleRate);
+        fakeSustainProc.prepare(sampleRate);
     }
 
     void startNote(int midiNoteNumber,
@@ -532,8 +717,9 @@ public:
         op1.noteOn(baseFreqHz * pitchBendFactor, midiVel127);
         op2.noteOn(baseFreqHz * pitchBendFactor, midiVel127);
 
-        // Reset & prime the per-voice 12 dB/oct ZDF IXA lowpass filter and LFOs
+        // Reset & prime the per-voice 12 dB/oct ZDF IXA lowpass filter, LFOs, and Fake Sustain
         ixaLowpassFilter.reset();
+        fakeSustainProc.noteOn();
         const uint32_t seed = static_cast<uint32_t>(midiNoteNumber * 131 + midiVel127 * 17 + 1);
         lfo1Gen.noteOn(voiceParams.lfo1.keySync, voiceParams.lfo1.delaySec, seed);
         lfo2Gen.noteOn(voiceParams.lfo2.keySync, voiceParams.lfo2.delaySec, seed ^ 0xA5A55A5Au);
@@ -556,19 +742,30 @@ public:
 
     void stopNote(float /*velocity*/, bool allowTailOff) override
     {
-        slotAPlayer.stopNote(allowTailOff);
-        slotBPlayer.stopNote(allowTailOff);
+        const bool fakeSusActive = (voiceParams.fakeSustain.mode != FakeSustainMode::Off);
+        const auto routing = voiceParams.fakeSustain.routing;
+
+        const bool holdPcmForFakeSus   = fakeSusActive && (routing == FakeSustainRouting::GlobalAllLayers
+                                                        || routing == FakeSustainRouting::PcmElementsOnly);
+        const bool holdSynthForFakeSus = fakeSusActive && (routing == FakeSustainRouting::GlobalAllLayers
+                                                        || routing == FakeSustainRouting::IxaSynthOnly);
+
+        slotAPlayer.stopNote(allowTailOff, holdPcmForFakeSus);
+        slotBPlayer.stopNote(allowTailOff, holdPcmForFakeSus);
 
         if (allowTailOff)
         {
-            op1.noteOff();
-            op2.noteOff();
+            op1.noteOff(holdSynthForFakeSus);
+            op2.noteOff(holdSynthForFakeSus);
+            if (fakeSusActive)
+                fakeSustainProc.noteOff();
         }
         else
         {
             op1.reset();
             op2.reset();
             ixaLowpassFilter.reset();
+            fakeSustainProc.reset();
             clearCurrentNote();
         }
     }
@@ -617,6 +814,13 @@ public:
         const double velScale = 0.3 + 0.7 * currentNormalizedVelocity;
         const double maxValidCutoff = 0.48 * getSampleRate();
 
+        const bool fakeSusEnabled = (voiceParams.fakeSustain.mode != FakeSustainMode::Off);
+        const auto fakeSusRoute   = voiceParams.fakeSustain.routing;
+        const bool applyFakeSusToPcm   = fakeSusEnabled && (fakeSusRoute == FakeSustainRouting::GlobalAllLayers
+                                                         || fakeSusRoute == FakeSustainRouting::PcmElementsOnly);
+        const bool applyFakeSusToSynth = fakeSusEnabled && (fakeSusRoute == FakeSustainRouting::GlobalAllLayers
+                                                         || fakeSusRoute == FakeSustainRouting::IxaSynthOnly);
+
         // Cached LFO modulation offsets updated every 8 samples
         IXAOscillator::Parameters modOp1Params = voiceParams.op1Params;
         IXAOscillator::Parameters modOp2Params = voiceParams.op2Params;
@@ -630,7 +834,6 @@ public:
         {
             if ((lpfControlCounter++ & 7) == 0)
             {
-                // Evaluate LFO 1 (with CC#1 ModWheel boost) and LFO 2 every 8 samples
                 const double lfo1Val = lfo1Gen.advance(voiceParams.lfo1, 8, modWheelDepth * 0.5);
                 const double lfo2Val = lfo2Gen.advance(voiceParams.lfo2, 8, 0.0);
 
@@ -650,29 +853,29 @@ public:
                     switch (target)
                     {
                         case LfoTarget::MasterPitch:
-                            pitchLfoSemitones += val * 2.0; // +/- 2.0 semitones
+                            pitchLfoSemitones += val * 2.0;
                             break;
                         case LfoTarget::MasterAmplitude:
                             ampTremoloGain *= static_cast<float>(std::clamp(1.0 + val * 0.5, 0.0, 1.5));
                             break;
                         case LfoTarget::IxaLpfCutoff:
-                            lpfCutoffLfoOct += val * 3.5; // +/- 3.5 octaves
+                            lpfCutoffLfoOct += val * 3.5;
                             break;
                         case LfoTarget::IxaOp1ModIndex:
-                            op1IdxOffset += val * 3.0; // +/- 3.0 index
+                            op1IdxOffset += val * 3.0;
                             break;
                         case LfoTarget::IxaOp2ModIndex:
-                            op2IdxOffset += val * 3.0; // +/- 3.0 index
+                            op2IdxOffset += val * 3.0;
                             break;
                         case LfoTarget::IxaBothOpsIndex:
                             op1IdxOffset += val * 3.0;
                             op2IdxOffset += val * 3.0;
                             break;
                         case LfoTarget::IxaOp1CarrierWarp:
-                            op1WarpOffset += val * 0.8; // +/- 0.8 warp
+                            op1WarpOffset += val * 0.8;
                             break;
                         case LfoTarget::IxaOp1Feedback:
-                            op1FbOffset += val * 0.35; // +/- 0.35 feedback
+                            op1FbOffset += val * 0.35;
                             break;
                         case LfoTarget::IxaOp2FineFreq:
                             op2FreqOffsetHz += val * 35.0;
@@ -690,13 +893,11 @@ public:
                 accumulateLfoTarget(voiceParams.lfo1.target, lfo1Val);
                 accumulateLfoTarget(voiceParams.lfo2.target, lfo2Val);
 
-                // Apply pitch bend + LFO vibrato to Operators 1 & 2
                 const double totalPitchSemi = pitchBendSemitones + pitchLfoSemitones;
                 const double instFreqHz = noteFreqHz * std::pow(2.0, totalPitchSemi / 12.0);
                 op1.setFrequency(instFreqHz);
                 op2.setFrequency(instFreqHz);
 
-                // Apply LFO modulation offsets to IXA Operator parameters
                 modOp1Params = voiceParams.op1Params;
                 modOp1Params.baseModIndex = std::clamp(voiceParams.op1Params.baseModIndex + op1IdxOffset, 0.0, 6.0);
                 modOp1Params.carrierWarp  = std::clamp(voiceParams.op1Params.carrierWarp  + op1WarpOffset, 0.0, 1.0);
@@ -707,7 +908,6 @@ public:
                 modOp2Params.coarseRatio  = std::clamp(voiceParams.op2Params.coarseRatio  + op2RatioOffset, 0.5, 16.0);
                 modOp2Params.fineDetuneHz = std::clamp(voiceParams.op2Params.fineDetuneHz + op2FreqOffsetHz, -100.0, 100.0);
 
-                // Compute PCM A/B Crossfade scale factors
                 pcmALevelScale = static_cast<float>(std::clamp(1.0 - std::max(0.0, pcmCrossfade), 0.0, 1.5));
                 pcmBLevelScale = static_cast<float>(std::clamp(1.0 + std::min(0.0, pcmCrossfade), 0.0, 1.5));
                 if (pcmCrossfade > 0.0)
@@ -715,7 +915,6 @@ public:
                 else if (pcmCrossfade < 0.0)
                     pcmALevelScale = static_cast<float>(std::clamp(1.0 - pcmCrossfade * 0.5, 0.0, 1.5));
 
-                // Update Phase 4 12dB LPF coefficients (including LFO cutoff modulation)
                 const bool bypassLpf = (fCutBase >= 19800.0
                                      && std::abs(envDepthOct) < 1.0e-4
                                      && std::abs(lpfCutoffLfoOct) < 1.0e-4);
@@ -730,12 +929,17 @@ public:
                 }
             }
 
+            // Evaluate Phase 6.5 Fake Sustain / Envelope Reverb multiplier
+            const float fakeSusGain = fakeSustainProc.processSample(voiceParams.fakeSustain);
+            const float pcmFakeGain   = applyFakeSusToPcm   ? fakeSusGain : 1.0f;
+            const float synthFakeGain = applyFakeSusToSynth ? fakeSusGain : 1.0f;
+
             float pcmAL = 0.0f, pcmAR = 0.0f;
             float pcmBL = 0.0f, pcmBR = 0.0f;
 
             const double totalPitchSemi = pitchBendSemitones + pitchLfoSemitones;
-            slotAPlayer.renderNextSample(voiceParams.slotA, totalPitchSemi, pcmALevelScale, pcmAL, pcmAR);
-            slotBPlayer.renderNextSample(voiceParams.slotB, totalPitchSemi, pcmBLevelScale, pcmBL, pcmBR);
+            slotAPlayer.renderNextSample(voiceParams.slotA, totalPitchSemi, pcmALevelScale * pcmFakeGain, pcmAL, pcmAR);
+            slotBPlayer.renderNextSample(voiceParams.slotB, totalPitchSemi, pcmBLevelScale * pcmFakeGain, pcmBL, pcmBR);
 
             float synthL = 0.0f;
             float synthR = 0.0f;
@@ -770,8 +974,8 @@ public:
                 if (!currentBypassLpf)
                     synthMono = ixaLowpassFilter.processSample(synthMono);
 
-                synthL = static_cast<float>(synthMono) * synthGainL;
-                synthR = static_cast<float>(synthMono) * synthGainR;
+                synthL = static_cast<float>(synthMono) * synthGainL * synthFakeGain;
+                synthR = static_cast<float>(synthMono) * synthGainR * synthFakeGain;
             }
 
             const float totalL = (pcmAL + pcmBL + synthL) * ampTremoloGain;
@@ -781,12 +985,28 @@ public:
             if (outR != nullptr)
                 outR[i] += totalR;
 
-            const bool anyActive = slotAPlayer.isActive()
-                                || slotBPlayer.isActive()
-                                || (voiceParams.synthEnabled && (op1.isActive() || op2.isActive()));
+            if (fakeSustainProc.isReleasing() && fakeSustainProc.hasFinished())
+            {
+                // If Fake Sustain finished decaying, release any held layers
+                if (applyFakeSusToPcm)
+                {
+                    slotAPlayer.stopNote(false, false);
+                    slotBPlayer.stopNote(false, false);
+                }
+                if (applyFakeSusToSynth)
+                {
+                    op1.reset();
+                    op2.reset();
+                }
+            }
+
+            const bool pcmStillActive   = slotAPlayer.isActive() || slotBPlayer.isActive();
+            const bool synthStillActive = voiceParams.synthEnabled && (op1.isActive() || op2.isActive());
+            const bool anyActive = pcmStillActive || synthStillActive;
 
             if (!anyActive)
             {
+                fakeSustainProc.reset();
                 clearCurrentNote();
                 break;
             }
@@ -797,7 +1017,7 @@ private:
     void updatePitchWheel(int pitchWheelVal) noexcept
     {
         const double norm = (static_cast<double>(pitchWheelVal) - 8192.0) / 8192.0;
-        pitchBendSemitones = norm * 2.0; // +/- 2 semitones standard bend range
+        pitchBendSemitones = norm * 2.0;
         pitchBendFactor = std::pow(2.0, pitchBendSemitones / 12.0);
     }
 
@@ -811,6 +1031,7 @@ private:
     IXAZdfButterworthLPF ixaLowpassFilter;
     VoiceLFOGenerator lfo1Gen;
     VoiceLFOGenerator lfo2Gen;
+    FakeSustainEnvelopeProcessor fakeSustainProc;
 
     int currentMidiNote = 60;
     double currentNormalizedVelocity = 1.0;
