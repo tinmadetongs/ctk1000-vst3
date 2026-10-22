@@ -577,6 +577,17 @@ private:
     double guiLfo1Phase = 0.0;
     double guiLfo2Phase = 0.0;
 
+    //==============================================================================
+    // 7. Phase 6.5: SA / PSS Fake Sustain & Envelope Reverb Controls
+    juce::ComboBox fakeSusModeCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fakeSusModeAttach;
+
+    juce::ComboBox fakeSusRoutingCombo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fakeSusRoutingAttach;
+
+    LabeledKnob fakeSusTimeKnob;
+    LabeledKnob fakeSusCurveKnob;
+
     // On-screen interactive MIDI keyboard strip at the bottom edge
     juce::MidiKeyboardComponent midiKeyboard;
 
@@ -595,6 +606,7 @@ private:
     juce::Rectangle<int> dspLedMatrixBounds;
     juce::Rectangle<int> lfo1Bounds;
     juce::Rectangle<int> lfo2Bounds;
+    juce::Rectangle<int> fakeSusBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CasioCTK1000AudioProcessorEditor)
 };
