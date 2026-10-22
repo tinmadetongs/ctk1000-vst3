@@ -434,6 +434,42 @@ juce::AudioProcessorValueTreeState::ParameterLayout CasioCTK1000AudioProcessor::
     addLfoParams(1, 1, 5.2f, 0.35f); // LFO 1 default: Master Pitch (Vibrato), 5.2 Hz, 0.35s delay
     addLfoParams(2, 6, 1.2f, 0.00f); // LFO 2 default: IXA Both Ops Index, 1.2 Hz, 0.0s delay
 
+    //==============================================================================
+    // 6. Phase 6.5: SA-Series / Yamaha Portasound Fake Sustain & Envelope Reverb
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { "FAKE_SUS_MODE", 1 },
+        "Fake Sustain / Env Reverb Mode",
+        juce::StringArray {
+            "Off (Std ADSR)",
+            "SA-Series Sustain",
+            "PSS-480 Fake Reverb",
+            "8-Bit Stepped Echo"
+        },
+        0));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { "FAKE_SUS_TIME", 1 },
+        "Fake Sustain Tail Time (s)",
+        juce::NormalisableRange<float>(0.20f, 6.00f, 0.01f, 0.45f),
+        1.80f,
+        juce::AudioParameterFloatAttributes().withLabel("s")));
+
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { "FAKE_SUS_CURVE", 1 },
+        "Fake Sustain Shelf / Curve",
+        juce::NormalisableRange<float>(0.05f, 0.85f, 0.01f),
+        0.30f));
+
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { "FAKE_SUS_ROUTING", 1 },
+        "Fake Sustain Layer Routing",
+        juce::StringArray {
+            "All Layers (Global)",
+            "IXA Synth Only",
+            "PCM Elements Only"
+        },
+        0));
+
     return { params.begin(), params.end() };
 }
 
@@ -614,6 +650,14 @@ void CasioCTK1000AudioProcessor::updateVoiceAndEffectParameters() noexcept
 
     fillLfoParams("LFO1_", currentVoiceParams.lfo1);
     fillLfoParams("LFO2_", currentVoiceParams.lfo2);
+
+    // Update Phase 6.5 Fake Sustain & Envelope Reverb parameters
+    currentVoiceParams.fakeSustain.mode = static_cast<CasioIXA::FakeSustainMode>(
+        std::clamp(static_cast<int>(apvts.getRawParameterValue("FAKE_SUS_MODE")->load()), 0, 3));
+    currentVoiceParams.fakeSustain.tailTimeSec  = apvts.getRawParameterValue("FAKE_SUS_TIME")->load();
+    currentVoiceParams.fakeSustain.curveOrShelf = apvts.getRawParameterValue("FAKE_SUS_CURVE")->load();
+    currentVoiceParams.fakeSustain.routing      = static_cast<CasioIXA::FakeSustainRouting>(
+        std::clamp(static_cast<int>(apvts.getRawParameterValue("FAKE_SUS_ROUTING")->load()), 0, 2));
 }
 
 void CasioCTK1000AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
