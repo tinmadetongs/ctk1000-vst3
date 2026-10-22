@@ -403,7 +403,7 @@ class CasioCTK1000AudioProcessorEditor : public juce::AudioProcessorEditor,
 {
 public:
     static constexpr int kBaseWidth  = 1180;
-    static constexpr int kBaseHeight = 760;
+    static constexpr int kBaseHeight = 856;
 
     explicit CasioCTK1000AudioProcessorEditor(CasioCTK1000AudioProcessor&);
     ~CasioCTK1000AudioProcessorEditor() override;
@@ -554,6 +554,29 @@ private:
     LabeledKnob dspToneKnob;
     LabeledKnob dspMixKnob;
 
+    //==============================================================================
+    // 6. Phase 6: Dual Assignable Multi-Target LFO Engine (LFO 1 & LFO 2)
+    struct LFOControlGroup
+    {
+        juce::ComboBox waveCombo;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> waveAttach;
+
+        juce::ComboBox targetCombo;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> targetAttach;
+
+        juce::TextButton syncBtn { "KEY SYNC" };
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> syncAttach;
+
+        LabeledKnob rateKnob;
+        LabeledKnob delayKnob;
+        LabeledKnob depthKnob;
+    };
+
+    LFOControlGroup lfo1Controls;
+    LFOControlGroup lfo2Controls;
+    double guiLfo1Phase = 0.0;
+    double guiLfo2Phase = 0.0;
+
     // On-screen interactive MIDI keyboard strip at the bottom edge
     juce::MidiKeyboardComponent midiKeyboard;
 
@@ -570,6 +593,8 @@ private:
     juce::Rectangle<int> legacyLedReadoutBounds;
     juce::Rectangle<int> dspBounds;
     juce::Rectangle<int> dspLedMatrixBounds;
+    juce::Rectangle<int> lfo1Bounds;
+    juce::Rectangle<int> lfo2Bounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CasioCTK1000AudioProcessorEditor)
 };
