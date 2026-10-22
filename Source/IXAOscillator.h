@@ -57,6 +57,8 @@ public:
         firstSample = true;
         dacPhase = 0.0;
         heldSample = 0.0;
+        holdingAmpForFakeSustain = false;
+        heldAmpEnvValue = 0.0;
         modEnv.reset();
         ampEnv.reset();
     }
@@ -85,19 +87,24 @@ public:
         firstSample = true;
         dacPhase = 0.0;
         heldSample = 0.0;
+        holdingAmpForFakeSustain = false;
+        heldAmpEnvValue = 0.0;
         modEnv.noteOn();
         ampEnv.noteOn();
     }
 
-    void noteOff() noexcept
+    void noteOff(bool holdAmpForFakeSustain = false) noexcept
     {
         modEnv.noteOff();
-        ampEnv.noteOff();
+        if (holdAmpForFakeSustain)
+            holdingAmpForFakeSustain = true;
+        else
+            ampEnv.noteOff();
     }
 
     bool isActive() const noexcept
     {
-        return ampEnv.isActive();
+        return holdingAmpForFakeSustain || ampEnv.isActive();
     }
 
     void setFrequency(double freqHz) noexcept
@@ -168,11 +175,20 @@ public:
      */
     double processSample(const Parameters& params, double extPhase = 0.0) noexcept
     {
-        if (!ampEnv.isActive())
+        if (!holdingAmpForFakeSustain && !ampEnv.isActive())
             return 0.0;
 
         const double eMod = static_cast<double>(modEnv.getNextSample());
-        const double eAmp = static_cast<double>(ampEnv.getNextSample());
+        double eAmp = 0.0;
+        if (holdingAmpForFakeSustain)
+        {
+            eAmp = heldAmpEnvValue;
+        }
+        else
+        {
+            eAmp = static_cast<double>(ampEnv.getNextSample());
+            heldAmpEnvValue = eAmp;
+        }
         lastModEnvValue = eMod;
 
         // Legacy 0-9 CTK-1000 Tone Editor Macro Lookup Table
@@ -318,6 +334,8 @@ private:
 
     double dacPhase = 0.0;
     double heldSample = 0.0;
+    bool holdingAmpForFakeSustain = false;
+    double heldAmpEnvValue = 0.0;
 
     juce::ADSR modEnv;
     juce::ADSR ampEnv;
