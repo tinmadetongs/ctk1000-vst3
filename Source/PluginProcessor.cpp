@@ -364,6 +364,76 @@ juce::AudioProcessorValueTreeState::ParameterLayout CasioCTK1000AudioProcessor::
         "DSP Bypass",
         false));
 
+    //==============================================================================
+    // 5. Phase 6: Dual Assignable Multi-Target LFO Engine (LFO 1 & LFO 2)
+    const juce::StringArray lfoWaveChoices {
+        "Triangle",
+        "Sine",
+        "Saw Up",
+        "Square",
+        "Sample & Hold"
+    };
+
+    const juce::StringArray lfoTargetChoices {
+        "None / Off",
+        "Master Pitch (Vibrato)",
+        "Master Amplitude (Tremolo)",
+        "IXA 12dB LPF Cutoff",
+        "IXA Op 1 Mod Index (n)",
+        "IXA Op 2 Mod Index (n)",
+        "IXA Both Ops Index (n1+n2)",
+        "IXA Op 1 Carrier Warp (a)",
+        "IXA Op 1 Self-Feedback (b)",
+        "IXA Op 2 Fine Freq / Ratio",
+        "PCM A/B Crossfade Balance"
+    };
+
+    auto addLfoParams = [&](int lfoNum, int defTarget, float defRate, float defDelay)
+    {
+        const juce::String prefix = "LFO" + juce::String(lfoNum) + "_";
+        const juce::String label  = "LFO " + juce::String(lfoNum) + " ";
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { prefix + "WAVE", 1 },
+            label + "Waveform",
+            lfoWaveChoices,
+            0));
+
+        params.push_back(std::make_unique<juce::AudioParameterChoice>(
+            juce::ParameterID { prefix + "TARGET", 1 },
+            label + "Target",
+            lfoTargetChoices,
+            defTarget));
+
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { prefix + "RATE", 1 },
+            label + "Rate (Hz)",
+            juce::NormalisableRange<float>(0.05f, 30.0f, 0.01f, 0.35f),
+            defRate,
+            juce::AudioParameterFloatAttributes().withLabel("Hz")));
+
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { prefix + "DELAY", 1 },
+            label + "Fade-In Delay (s)",
+            juce::NormalisableRange<float>(0.0f, 5.0f, 0.01f, 0.5f),
+            defDelay,
+            juce::AudioParameterFloatAttributes().withLabel("s")));
+
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { prefix + "DEPTH", 1 },
+            label + "Mod Depth",
+            juce::NormalisableRange<float>(-1.0f, 1.0f, 0.01f),
+            0.0f));
+
+        params.push_back(std::make_unique<juce::AudioParameterBool>(
+            juce::ParameterID { prefix + "SYNC", 1 },
+            label + "Key Sync",
+            true));
+    };
+
+    addLfoParams(1, 1, 5.2f, 0.35f); // LFO 1 default: Master Pitch (Vibrato), 5.2 Hz, 0.35s delay
+    addLfoParams(2, 6, 1.2f, 0.00f); // LFO 2 default: IXA Both Ops Index, 1.2 Hz, 0.0s delay
+
     return { params.begin(), params.end() };
 }
 
@@ -528,6 +598,22 @@ void CasioCTK1000AudioProcessor::updateVoiceAndEffectParameters() noexcept
     currentEffectParams.wetDryMix     = apvts.getRawParameterValue("DSP_MIX")->load();
     currentEffectParams.lofiPsramMode = apvts.getRawParameterValue("DSP_LOFI_PSRAM")->load() > 0.5f;
     currentEffectParams.bypass        = apvts.getRawParameterValue("DSP_BYPASS")->load() > 0.5f;
+
+    // Update Phase 6 Dual LFO parameters
+    auto fillLfoParams = [&](const juce::String& prefix, CasioIXA::LfoParameters& lfoP)
+    {
+        lfoP.waveform = static_cast<CasioIXA::LfoWaveform>(
+            std::clamp(static_cast<int>(apvts.getRawParameterValue(prefix + "WAVE")->load()), 0, 4));
+        lfoP.target = static_cast<CasioIXA::LfoTarget>(
+            std::clamp(static_cast<int>(apvts.getRawParameterValue(prefix + "TARGET")->load()), 0, 10));
+        lfoP.rateHz   = apvts.getRawParameterValue(prefix + "RATE")->load();
+        lfoP.delaySec = apvts.getRawParameterValue(prefix + "DELAY")->load();
+        lfoP.depth    = apvts.getRawParameterValue(prefix + "DEPTH")->load();
+        lfoP.keySync  = apvts.getRawParameterValue(prefix + "SYNC")->load() > 0.5f;
+    };
+
+    fillLfoParams("LFO1_", currentVoiceParams.lfo1);
+    fillLfoParams("LFO2_", currentVoiceParams.lfo2);
 }
 
 void CasioCTK1000AudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
