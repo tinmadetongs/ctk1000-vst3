@@ -207,6 +207,51 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
     initRotaryKnob(dspToneKnob,   "DSP_TONE",   "PrFit TONE", true);
     initRotaryKnob(dspMixKnob,    "DSP_MIX",    "WET / DRY");
 
+    //==============================================================================
+    // 6. Phase 6: Dual Assignable Multi-Target LFO Engine (LFO 1 & LFO 2)
+    auto setupLFOGroup = [&](LFOControlGroup& lfo, const juce::String& prefix)
+    {
+        lfo.waveCombo.addItemList({
+            "Triangle",
+            "Sine",
+            "Saw Up",
+            "Square",
+            "Sample & Hold"
+        }, 1);
+        mainCanvas.addAndMakeVisible(lfo.waveCombo);
+        lfo.waveAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, prefix + "WAVE", lfo.waveCombo);
+
+        lfo.targetCombo.addItemList({
+            "None / Off",
+            "Master Pitch (Vibrato)",
+            "Master Amp (Tremolo)",
+            "IXA 12dB LPF Cutoff",
+            "IXA Op 1 Mod Index (n)",
+            "IXA Op 2 Mod Index (n)",
+            "IXA Both Ops Index (n1+n2)",
+            "IXA Op 1 Carrier Warp (a)",
+            "IXA Op 1 Self-Feedback (b)",
+            "IXA Op 2 Fine Freq / Ratio",
+            "PCM A/B Crossfade Balance"
+        }, 1);
+        mainCanvas.addAndMakeVisible(lfo.targetCombo);
+        lfo.targetAttach = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+            apvts, prefix + "TARGET", lfo.targetCombo);
+
+        lfo.syncBtn.setClickingTogglesState(true);
+        mainCanvas.addAndMakeVisible(lfo.syncBtn);
+        lfo.syncAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+            apvts, prefix + "SYNC", lfo.syncBtn);
+
+        initRotaryKnob(lfo.rateKnob,  prefix + "RATE",  "RATE (Hz)", false);
+        initRotaryKnob(lfo.delayKnob, prefix + "DELAY", "DELAY (s)", true);
+        initRotaryKnob(lfo.depthKnob, prefix + "DEPTH", "DEPTH",     false);
+    };
+
+    setupLFOGroup(lfo1Controls, "LFO1_");
+    setupLFOGroup(lfo2Controls, "LFO2_");
+
     // Configure MIDI keyboard colors to match CTK-1000 hardware (36..96 = 36 white keys)
     midiKeyboard.setAvailableRange(36, 96);
     midiKeyboard.setScrollButtonsVisible(false);
@@ -414,9 +459,17 @@ void CasioCTK1000AudioProcessorEditor::timerCallback()
     if (pcmSlotB.instrumentCombo.getSelectedItemIndex() != hostIdxB)
         pcmSlotB.instrumentCombo.setSelectedItemIndex(hostIdxB, juce::dontSendNotification);
 
+    const double dt = 1.0 / 30.0;
+    const double r1 = static_cast<double>(processorRef.getAPVTS().getRawParameterValue("LFO1_RATE")->load());
+    const double r2 = static_cast<double>(processorRef.getAPVTS().getRawParameterValue("LFO2_RATE")->load());
+    guiLfo1Phase = std::fmod(guiLfo1Phase + r1 * dt, 1.0);
+    guiLfo2Phase = std::fmod(guiLfo2Phase + r2 * dt, 1.0);
+
     mainCanvas.repaint(centerLedWindowBounds);
     mainCanvas.repaint(legacyLedReadoutBounds);
     mainCanvas.repaint(dspLedMatrixBounds);
+    mainCanvas.repaint(lfo1Bounds.withHeight(22));
+    mainCanvas.repaint(lfo2Bounds.withHeight(22));
 }
 
 void CasioCTK1000AudioProcessorEditor::drawHardwareSectionFrame(juce::Graphics& g,
@@ -645,6 +698,41 @@ void CasioCTK1000AudioProcessorEditor::paintCanvas(juce::Graphics& g)
                        juce::Justification::centredLeft, false);
         }
     }
+
+    // 7. Phase 6: Dual Assignable Multi-Target LFO Panels with Live Pulsing Rate LEDs
+    drawHardwareSectionFrame(g, lfo1Bounds, "MODULATION LFO 1 (CC#1 MOD WHEEL + DELAYED VIBRATO / MULTI-TARGET)");
+    drawHardwareSectionFrame(g, lfo2Bounds, "MODULATION LFO 2 (AUXILIARY WAVEFOLDER / FILTER / PCM CROSSFADE LFO)");
+
+    auto drawPulsingLfoHeaderLed = [&](juce::Rectangle<int> boxBounds, double phase, const juce::String& prefix)
+    {
+        const int targetIdx = static_cast<int>(processorRef.getAPVTS().getRawParameterValue(prefix + "TARGET")->load());
+        const float depthVal = std::abs(processorRef.getAPVTS().getRawParameterValue(prefix + "DEPTH")->load());
+        const bool isActive = (targetIdx != 0) && (depthVal > 0.005f || prefix == "LFO1_");
+
+        const float pulse = 0.5f + 0.5f * static_cast<float>(std::sin(juce::MathConstants<double>::twoPi * phase));
+        const float ledR = 4.2f;
+        const float ledX = static_cast<float>(boxBounds.getRight() - 18);
+        const float ledY = static_cast<float>(boxBounds.getY() + 10) - ledR;
+
+        g.setColour(CasioIXA::CTK1000LookAndFeel::kLedBezelDark);
+        g.fillEllipse(ledX - 1.0f, ledY - 1.0f, (ledR + 1.0f) * 2.0f, (ledR + 1.0f) * 2.0f);
+
+        if (isActive)
+        {
+            g.setColour(CasioIXA::CTK1000LookAndFeel::kLedCrimson.withAlpha(0.20f + 0.65f * pulse));
+            g.fillEllipse(ledX - 2.5f, ledY - 2.5f, (ledR + 2.5f) * 2.0f, (ledR + 2.5f) * 2.0f);
+            g.setColour(CasioIXA::CTK1000LookAndFeel::kLedCrimson.withAlpha(0.35f + 0.65f * pulse));
+            g.fillEllipse(ledX, ledY, ledR * 2.0f, ledR * 2.0f);
+        }
+        else
+        {
+            g.setColour(juce::Colour(0xff4a1212));
+            g.fillEllipse(ledX, ledY, ledR * 2.0f, ledR * 2.0f);
+        }
+    };
+
+    drawPulsingLfoHeaderLed(lfo1Bounds, guiLfo1Phase, "LFO1_");
+    drawPulsingLfoHeaderLed(lfo2Bounds, guiLfo2Phase, "LFO2_");
 }
 
 void CasioCTK1000AudioProcessorEditor::layoutCanvas()
@@ -703,7 +791,11 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
 
     fullArea.removeFromTop(6);
 
-    // Bottom Row for Legacy 0-9 Tone Editor Override (Left) + 8-Mode Semi-OBS DSP Effect Processor (Right) (142 px)
+    // Phase 6 Row: Dual Assignable Multi-Target LFO Strip (90 px) right above the MIDI Keyboard
+    auto lfoRowArea = fullArea.removeFromBottom(90);
+    fullArea.removeFromBottom(6);
+
+    // Legacy 0-9 Tone Editor Override (Left) + 8-Mode Semi-OBS DSP Effect Processor (Right) (142 px)
     auto bottomPanelsArea = fullArea.removeFromBottom(142);
     fullArea.removeFromBottom(6);
 
@@ -816,4 +908,32 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
         inner.removeFromLeft(10);
         layoutKnobGrid({ &dspParam1Knob, &dspParam2Knob, &dspToneKnob, &dspMixKnob }, inner, 4);
     }
+
+    //==============================================================================
+    // 6. Layout Phase 6 Dual Assignable Multi-Target LFO Strip (LFO 1 Left, LFO 2 Right)
+    const int halfLfoW = (lfoRowArea.getWidth() - 8) / 2;
+    lfo1Bounds = lfoRowArea.removeFromLeft(halfLfoW);
+    lfoRowArea.removeFromLeft(8);
+    lfo2Bounds = lfoRowArea;
+
+    auto layoutLFOBox = [](LFOControlGroup& lfo, juce::Rectangle<int> bounds)
+    {
+        auto inner = bounds.reduced(8, 4);
+        inner.removeFromTop(18); // Header bar clearance
+
+        auto leftSelectors = inner.removeFromLeft(275);
+        auto row1 = leftSelectors.removeFromTop(26);
+        lfo.waveCombo.setBounds(row1.removeFromLeft(165));
+        row1.removeFromLeft(6);
+        lfo.syncBtn.setBounds(row1);
+
+        leftSelectors.removeFromTop(6);
+        lfo.targetCombo.setBounds(leftSelectors.removeFromTop(26));
+
+        inner.removeFromLeft(10);
+        layoutKnobGrid({ &lfo.rateKnob, &lfo.delayKnob, &lfo.depthKnob }, inner, 3);
+    };
+
+    layoutLFOBox(lfo1Controls, lfo1Bounds);
+    layoutLFOBox(lfo2Controls, lfo2Bounds);
 }
