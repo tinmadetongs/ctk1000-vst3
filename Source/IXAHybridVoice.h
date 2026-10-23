@@ -348,6 +348,8 @@ struct PCMSlotParameters
     bool overrideLoopPoints = false;
     float loopStartPercent = 40.0f;  // 0.0 to 100.0
     float loopEndPercent = 95.0f;    // 0.0 to 100.0
+    float loopCrossfade = 0.05f;     // 0.0 to 0.50 (0% to 50% of loop length)
+    bool equalPowerXfade = true;     // true = Equal-Power Cosine/Sine, false = Linear
     juce::ADSR::Parameters ampEnvParams { 0.005f, 0.25f, 0.8f, 0.20f };
 };
 
@@ -560,20 +562,102 @@ public:
             loopEnd = std::clamp<int64_t>(loopEnd, loopStart + 1, totalSamples - 1);
         }
 
-        // Interpolated sample read
-        const int idx0 = std::clamp(static_cast<int>(std::floor(readPosition)), 0, totalSamples - 1);
-        const int idx1 = std::clamp(idx0 + 1, 0, totalSamples - 1);
-        const float frac = static_cast<float>(readPosition - std::floor(readPosition));
-
+        // Helper lambda for safe linear-interpolated stereo read at any floating-point sample position
         const int numCh = activeZone->audioData.getNumChannels();
         const float* ch0 = activeZone->audioData.getReadPointer(0);
-        const float sampleL = ch0[idx0] + frac * (ch0[idx1] - ch0[idx0]);
+        const float* ch1 = (numCh > 1) ? activeZone->audioData.getReadPointer(1) : nullptr;
 
-        float sampleR = sampleL;
-        if (numCh > 1)
+        auto readInterpolatedStereo = [totalSamples, ch0, ch1](double pos, float& sL, float& sR) noexcept
         {
-            const float* ch1 = activeZone->audioData.getReadPointer(1);
-            sampleR = ch1[idx0] + frac * (ch1[idx1] - ch1[idx0]);
+            const double clampedPos = std::clamp(pos, 0.0, static_cast<double>(totalSamples - 1));
+            const int i0 = std::clamp(static_cast<int>(std::floor(clampedPos)), 0, totalSamples - 1);
+            const int i1 = std::clamp(i0 + 1, 0, totalSamples - 1);
+            const float frac = static_cast<float>(clampedPos - std::floor(clampedPos));
+
+            sL = ch0[i0] + frac * (ch0[i1] - ch0[i0]);
+            sR = (ch1 != nullptr) ? (ch1[i0] + frac * (ch1[i1] - ch1[i0])) : sL;
+        };
+
+        float sampleL = 0.0f;
+        float sampleR = 0.0f;
+        readInterpolatedStereo(readPosition, sampleL, sampleR);
+
+        // Phase 7: Real-Time Dual-Readhead Loop Crossfade & De-Click Engine (US Patent 5,319,151)
+        const double loopLen = static_cast<double>(std::max<int64_t>(1, loopEnd - loopStart));
+        const double xfadeNorm = std::clamp(static_cast<double>(params.loopCrossfade), 0.0, 0.50);
+
+        if (params.loopMode != SampleLoopMode::OneShot && xfadeNorm > 0.001 && loopLen >= 8.0)
+        {
+            const double wXfade = std::clamp(xfadeNorm * loopLen, 4.0, 0.5 * loopLen);
+            const double dStart = static_cast<double>(loopStart);
+            const double dEnd   = static_cast<double>(loopEnd);
+
+            auto blendStereo = [&params](float outL, float outR, float inL, float inR, double alpha, float& resL, float& resR) noexcept
+            {
+                const double clampedAlpha = std::clamp(alpha, 0.0, 1.0);
+                float gOut = 1.0f - static_cast<float>(clampedAlpha);
+                float gIn  = static_cast<float>(clampedAlpha);
+
+                if (params.equalPowerXfade)
+                {
+                    const double theta = clampedAlpha * juce::MathConstants<double>::halfPi;
+                    gOut = static_cast<float>(std::cos(theta));
+                    gIn  = static_cast<float>(std::sin(theta));
+                }
+
+                resL = gOut * outL + gIn * inL;
+                resR = gOut * outR + gIn * inR;
+            };
+
+            if (params.loopMode == SampleLoopMode::ForwardLoop)
+            {
+                // Case A: Forward Loop Crossfade when p in [loopEnd - W_xfade, loopEnd)
+                if (readPosition >= (dEnd - wXfade) && readPosition < dEnd)
+                {
+                    const double offsetInWindow = readPosition - (dEnd - wXfade);
+                    const double alpha = offsetInWindow / wXfade;
+
+                    // Compute incoming shadow readhead position p_in from pre-loop lead-in before loopStart
+                    double pIn = dStart - wXfade + offsetInWindow;
+                    if (pIn < 0.0)
+                    {
+                        // Safety wrap/mirror for short attack samples where loopStart < W_xfade
+                        pIn = dStart + IXAOscillator::positiveMod(offsetInWindow, loopLen);
+                    }
+                    pIn = std::clamp(pIn, 0.0, static_cast<double>(totalSamples - 1));
+
+                    float inL = 0.0f, inR = 0.0f;
+                    readInterpolatedStereo(pIn, inL, inR);
+                    blendStereo(sampleL, sampleR, inL, inR, alpha, sampleL, sampleR);
+                }
+            }
+            else if (params.loopMode == SampleLoopMode::PingPongLoop)
+            {
+                // Case B: Bidirectional Ping-Pong Turnaround Crossfade across turnaround vertices
+                if (direction > 0 && readPosition >= (dEnd - wXfade) && readPosition <= dEnd)
+                {
+                    // Approaching loopEnd moving forward: blend toward reflected backward readhead
+                    const double distToEnd = dEnd - readPosition;
+                    const double alpha = 1.0 - (distToEnd / wXfade); // 0 at window start -> 1 at turnaround vertex
+                    const double pReflected = std::clamp(dEnd - (wXfade - distToEnd), dStart, dEnd);
+
+                    float inL = 0.0f, inR = 0.0f;
+                    readInterpolatedStereo(pReflected, inL, inR);
+                    // At vertex (alpha=1), forward and reflected converge smoothly with zero slope discontinuity
+                    blendStereo(sampleL, sampleR, inL, inR, 0.5 * alpha, sampleL, sampleR);
+                }
+                else if (direction < 0 && readPosition >= dStart && readPosition <= (dStart + wXfade))
+                {
+                    // Approaching loopStart moving backward: blend toward reflected forward readhead
+                    const double distToStart = readPosition - dStart;
+                    const double alpha = 1.0 - (distToStart / wXfade);
+                    const double pReflected = std::clamp(dStart + (wXfade - distToStart), dStart, dEnd);
+
+                    float inL = 0.0f, inR = 0.0f;
+                    readInterpolatedStereo(pReflected, inL, inR);
+                    blendStereo(sampleL, sampleR, inL, inR, 0.5 * alpha, sampleL, sampleR);
+                }
+            }
         }
 
         // Compute pitch ratio including root note transposition, coarse/fine tune, pitch wheel, and LFO vibrato
