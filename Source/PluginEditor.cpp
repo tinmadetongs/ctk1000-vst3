@@ -120,6 +120,7 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
         initRotaryKnob(slot.velSens,   prefix + "VEL_SENS",    "VEL SENS");
         initRotaryKnob(slot.loopStart, prefix + "LOOP_START",  "LP START", true);
         initRotaryKnob(slot.loopEnd,   prefix + "LOOP_END",    "LP END",   true);
+        initRotaryKnob(slot.loopXfade, prefix + "XFADE",       "LP XFADE", true);
 
         initRotaryKnob(slot.attack,    prefix + "AMP_ATTACK",  "AMP A", true);
         initRotaryKnob(slot.decay,     prefix + "AMP_DECAY",   "AMP D", true);
@@ -129,6 +130,11 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
 
     setupPCMSlot(pcmSlotA, "PCM_A_", true);
     setupPCMSlot(pcmSlotB, "PCM_B_", false);
+
+    pcmEqPowerXfadeBtn.setClickingTogglesState(true);
+    mainCanvas.addAndMakeVisible(pcmEqPowerXfadeBtn);
+    pcmEqPowerXfadeAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
+        apvts, "PCM_XFADE_POWER", pcmEqPowerXfadeBtn);
 
     refreshInstrumentComboBoxes();
 
@@ -862,10 +868,15 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
     pcmColumn.removeFromTop(6);
     pcmBBounds = pcmColumn;
 
-    auto layoutPCMSlot = [](PCMSlotControls& slot, juce::Rectangle<int> bounds)
+    auto layoutPCMSlot = [this](PCMSlotControls& slot, juce::Rectangle<int> bounds, bool isSlotA)
     {
         auto inner = bounds.reduced(8, 5);
-        inner.removeFromTop(18); // Header clearance
+        auto headerBar = inner.removeFromTop(18);
+        if (isSlotA)
+        {
+            // Place compact EQ-PWR crossfade curve toggle in the top-right of PCM Element A's header bar
+            pcmEqPowerXfadeBtn.setBounds(headerBar.removeFromRight(68).expanded(0, 1));
+        }
 
         auto topBar = inner.removeFromTop(24);
         slot.enableBtn.setBounds(topBar.removeFromLeft(52));
@@ -879,13 +890,13 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
         inner.removeFromTop(4);
 
         layoutKnobGrid({
-            &slot.level, &slot.pan, &slot.coarse, &slot.fine, &slot.velSens, &slot.loopStart,
-            &slot.loopEnd, &slot.attack, &slot.decay, &slot.sustain, &slot.release
+            &slot.level,   &slot.pan,       &slot.coarse, &slot.fine,    &slot.velSens, &slot.loopStart,
+            &slot.loopEnd, &slot.loopXfade, &slot.attack, &slot.decay,   &slot.sustain, &slot.release
         }, inner, 6);
     };
 
-    layoutPCMSlot(pcmSlotA, pcmABounds);
-    layoutPCMSlot(pcmSlotB, pcmBBounds);
+    layoutPCMSlot(pcmSlotA, pcmABounds, true);
+    layoutPCMSlot(pcmSlotB, pcmBBounds, false);
 
     //==============================================================================
     // 3. Layout Center/Right Panel — Dual-Operator IXA Synthesis Engine + Dedicated 12dB LPF Sub-Panel
