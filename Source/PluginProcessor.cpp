@@ -289,6 +289,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout CasioCTK1000AudioProcessor::
             0.95f));
 
         params.push_back(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID { prefix + "XFADE", 1 },
+            label + "Loop Crossfade",
+            juce::NormalisableRange<float>(0.0f, 0.50f, 0.005f),
+            0.05f));
+
+        params.push_back(std::make_unique<juce::AudioParameterFloat>(
             juce::ParameterID { prefix + "AMP_ATTACK", 1 },
             label + "Amp Attack (s)",
             juce::NormalisableRange<float>(0.001f, 5.0f, 0.001f, 0.35f),
@@ -312,6 +318,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout CasioCTK1000AudioProcessor::
 
     addPCMSlotParams("A", true,  0.75f, -0.15f);
     addPCMSlotParams("B", false, 0.65f,  0.15f);
+
+    params.push_back(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { "PCM_XFADE_POWER", 1 },
+        "Equal-Power Loop XFade",
+        true));
 
     //==============================================================================
     // 4. 8-Mode Semi-OBS DSP Effect Processor (Sanyo LC33832PL-70)
@@ -614,6 +625,8 @@ void CasioCTK1000AudioProcessor::updateVoiceAndEffectParameters() noexcept
         slotP.overrideLoopPoints    = apvts.getRawParameterValue(prefix + "LOOP_OVERRIDE")->load() > 0.5f;
         slotP.loopStartPercent      = apvts.getRawParameterValue(prefix + "LOOP_START")->load() * 100.0f;
         slotP.loopEndPercent        = apvts.getRawParameterValue(prefix + "LOOP_END")->load() * 100.0f;
+        slotP.loopCrossfade         = apvts.getRawParameterValue(prefix + "XFADE")->load();
+        slotP.equalPowerXfade       = apvts.getRawParameterValue("PCM_XFADE_POWER")->load() > 0.5f;
 
         slotP.ampEnvParams.attack   = legacyMacro ? macroAtk : apvts.getRawParameterValue(prefix + "AMP_ATTACK")->load();
         slotP.ampEnvParams.decay    = apvts.getRawParameterValue(prefix + "AMP_DECAY")->load();
