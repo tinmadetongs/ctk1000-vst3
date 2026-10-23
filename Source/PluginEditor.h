@@ -506,12 +506,14 @@ private:
         juce::TextButton loopOverrideBtn { "LOOP OVR" };
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> loopOverrideAttach;
 
-        LabeledKnob level, pan, coarse, fine, velSens, loopStart, loopEnd;
+        LabeledKnob level, pan, coarse, fine, velSens, loopStart, loopEnd, loopXfade;
         LabeledKnob attack, decay, sustain, release;
     };
 
     PCMSlotControls pcmSlotA;
     PCMSlotControls pcmSlotB;
+    juce::TextButton pcmEqPowerXfadeBtn { "EQ-PWR" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> pcmEqPowerXfadeAttach;
 
     //==============================================================================
     // 3. Center Panel — Dual-Operator IXA Synthesis Engine (Operators 1 & 2) + 12dB LPF
