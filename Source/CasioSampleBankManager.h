@@ -87,6 +87,57 @@ public:
      * Parses any filename from sa51_filelist.txt into (instrumentGroupName, rootMidiNote)
      * using strictly safe native juce::String operations and ASCII sanitization.
      */
+    /**
+     * Nudges a target sample index by up to +/- maxSearchSamples to the nearest
+     * positive-slope zero crossing (ch0[idx - 1] <= 0 && ch0[idx] >= 0) so default
+     * loop boundaries start and end with minimal DC/phase discontinuity.
+     */
+    static int64_t snapToNearestZeroCrossing(const juce::AudioBuffer<float>& buffer,
+                                             int64_t targetIndex,
+                                             int64_t minAllowed,
+                                             int64_t maxAllowed,
+                                             int maxSearchSamples = 64) noexcept
+    {
+        if (buffer.getNumSamples() < 4 || buffer.getNumChannels() < 1)
+            return std::clamp(targetIndex, minAllowed, maxAllowed);
+
+        const float* ch0 = buffer.getReadPointer(0);
+        const int64_t clampedTarget = std::clamp(targetIndex,
+                                                 std::max<int64_t>(1, minAllowed),
+                                                 std::min<int64_t>(buffer.getNumSamples() - 2, maxAllowed));
+
+        int64_t bestIdx = clampedTarget;
+        float bestScore = std::abs(ch0[clampedTarget]);
+
+        for (int offset = 0; offset <= maxSearchSamples; ++offset)
+        {
+            for (int sign : { 1, -1 })
+            {
+                if (offset == 0 && sign == -1)
+                    continue;
+
+                const int64_t cand = clampedTarget + static_cast<int64_t>(offset * sign);
+                if (cand < std::max<int64_t>(1, minAllowed) || cand > std::min<int64_t>(buffer.getNumSamples() - 2, maxAllowed))
+                    continue;
+
+                const float prevS = ch0[cand - 1];
+                const float currS = ch0[cand];
+
+                // Positive-slope zero crossing
+                if (prevS <= 0.0f && currS >= 0.0f)
+                    return cand;
+
+                const float mag = std::abs(currS);
+                if (mag < bestScore)
+                {
+                    bestScore = mag;
+                    bestIdx = cand;
+                }
+            }
+        }
+        return bestIdx;
+    }
+
     static bool parseSampleFilename(const juce::File& file,
                                     juce::String& outInstrumentName,
                                     int& outRootMidiNote)
@@ -307,6 +358,15 @@ public:
                 lStart = static_cast<int64_t>(std::floor(numSamples * 0.40));
                 lEnd   = std::max<int64_t>(lStart + 1, static_cast<int64_t>(std::floor(numSamples * 0.95)));
                 loopMode = SampleLoopMode::PingPongLoop;
+            }
+
+            // Snap loopStart and loopEnd within +/- 64 samples to nearest positive-slope zero crossing
+            if (numSamples > 32)
+            {
+                lStart = snapToNearestZeroCrossing(tempBuffer, lStart, 1, std::max<int64_t>(1, numSamples - 16), 64);
+                lEnd   = snapToNearestZeroCrossing(tempBuffer, lEnd, std::min<int64_t>(numSamples - 2, lStart + 8), numSamples - 2, 64);
+                if (lEnd <= lStart)
+                    lEnd = std::min<int64_t>(numSamples - 1, lStart + 1);
             }
 
             // Commit loaded audio data under lock
