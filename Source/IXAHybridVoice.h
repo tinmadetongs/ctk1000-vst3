@@ -338,6 +338,7 @@ private:
 struct PCMSlotParameters
 {
     bool enabled = true;
+    bool useCustomWave = false;
     int instrumentIndex = 0;
     float level = 0.8f;              // 0.0 to 1.0
     float pan = 0.0f;                // -1.0 (L) to +1.0 (R)
@@ -814,10 +815,25 @@ public:
         const SampleZone* zoneB = nullptr;
         {
             const juce::ScopedLock sl(sampleBank.getLock());
-            if (const auto* groupA = sampleBank.getInstrumentGroupByIndex(voiceParams.slotA.instrumentIndex))
+            if (voiceParams.slotA.useCustomWave)
+            {
+                if (const auto* customA = sampleBank.getCustomSlotGroup(0))
+                    zoneA = customA->findZoneForNote(midiNoteNumber);
+            }
+            else if (const auto* groupA = sampleBank.getInstrumentGroupByIndex(voiceParams.slotA.instrumentIndex))
+            {
                 zoneA = groupA->findZoneForNote(midiNoteNumber);
-            if (const auto* groupB = sampleBank.getInstrumentGroupByIndex(voiceParams.slotB.instrumentIndex))
+            }
+
+            if (voiceParams.slotB.useCustomWave)
+            {
+                if (const auto* customB = sampleBank.getCustomSlotGroup(1))
+                    zoneB = customB->findZoneForNote(midiNoteNumber);
+            }
+            else if (const auto* groupB = sampleBank.getInstrumentGroupByIndex(voiceParams.slotB.instrumentIndex))
+            {
                 zoneB = groupB->findZoneForNote(midiNoteNumber);
+            }
         }
 
         slotAPlayer.startNote(zoneA, midiNoteNumber, velocity, voiceParams.slotA);
