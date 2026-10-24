@@ -73,6 +73,13 @@ public:
     juce::String getSlotAInstrumentName() const;
     juce::String getSlotBInstrumentName() const;
 
+    // Phase 8: Custom External .WAV Loader API for Slot A (0) and Slot B (1)
+    bool loadCustomWaveFileForSlot(int slotIndex, const juce::File& wavFile);
+    bool isSlotUsingCustomWav(int slotIndex) const noexcept;
+    bool isSlotCustomWavMissing(int slotIndex) const noexcept;
+    juce::String getSlotCustomWavPath(int slotIndex) const;
+    juce::String getSlotDisplayLabel(int slotIndex) const;
+
     /** Copy of recent output waveform for real-time GUI oscilloscope inspection */
     void copyLatestScopeSamples(std::vector<float>& dest, int numRequested) const noexcept;
 
@@ -101,6 +108,15 @@ private:
 
     std::atomic<int> selectedSlotAIndex { 0 };
     std::atomic<int> selectedSlotBIndex { 0 };
+
+    // Phase 8: Per-Slot Custom External .WAV Tracking
+    std::atomic<bool> isUsingCustomWavA { false };
+    std::atomic<bool> isUsingCustomWavB { false };
+    std::atomic<bool> missingCustomWavA { false };
+    std::atomic<bool> missingCustomWavB { false };
+    juce::String customWavPathA;
+    juce::String customWavPathB;
+    mutable juce::CriticalSection customWavPathLock;
 
     // Lock-free ring buffer for GUI oscilloscope
     static constexpr int kScopeBufferSize = 2048;
