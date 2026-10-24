@@ -440,6 +440,174 @@ public:
         }
     }
 
+    juce::File getLastCustomWavDirectory() const
+    {
+        if (auto* props = const_cast<juce::ApplicationProperties&>(appProperties).getUserSettings())
+        {
+            const juce::String savedDir = props->getValue("lastCustomWavDir", "");
+            if (savedDir.isNotEmpty())
+            {
+                const juce::File dir(savedDir);
+                if (dir.exists() && dir.isDirectory())
+                    return dir;
+            }
+        }
+        if (currentDirectory.exists() && currentDirectory.isDirectory())
+            return currentDirectory;
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+    }
+
+    void saveLastCustomWavDirectory(const juce::File& dir)
+    {
+        if (dir.exists() && dir.isDirectory())
+        {
+            if (auto* props = appProperties.getUserSettings())
+            {
+                props->setValue("lastCustomWavDir", dir.getFullPathName());
+                props->saveIfNeeded();
+            }
+        }
+    }
+
+    /**
+     * Phase 8: Loads an arbitrary external .WAV file into PCM Slot A (slotIndex = 0) or Slot B (slotIndex = 1)
+     * as a full-keyboard (0..127) single-zone InstrumentGroup with automatic root note detection,
+     * 'smpl' chunk loop point extraction, and +/- 64-sample positive-slope zero-crossing snap.
+     */
+    bool loadCustomWaveFileForSlot(int slotIndex, const juce::File& wavFile)
+    {
+        if (slotIndex < 0 || slotIndex > 1 || !wavFile.existsAsFile())
+            return false;
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(wavFile));
+        if (reader == nullptr || reader->lengthInSamples <= 0)
+            return false;
+
+        const int numChannels = std::max(1, static_cast<int>(reader->numChannels));
+        const int numSamples  = static_cast<int>(reader->lengthInSamples);
+
+        juce::AudioBuffer<float> tempBuffer(numChannels, numSamples);
+        reader->read(&tempBuffer, 0, numSamples, 0, true, true);
+
+        const auto& meta = reader->metadataValues;
+
+        // 1. Root MIDI Note Detection:
+        //   (a) Check RIFF 'smpl' chunk "MidiUnityNote" if valid (0..127)
+        //   (b) Otherwise check trailing digits in filename via safe ASCII digit parser
+        //   (c) Otherwise default to 60 (C4)
+        int detectedRootNote = 60;
+        bool rootFound = false;
+
+        if (meta.containsKey("MidiUnityNote"))
+        {
+            const juce::String unityStr = meta.getValue("MidiUnityNote", "").trim();
+            if (unityStr.isNotEmpty() && unityStr.containsOnly("0123456789"))
+            {
+                const int unityVal = unityStr.getIntValue();
+                if (unityVal >= 0 && unityVal <= 127)
+                {
+                    detectedRootNote = unityVal;
+                    rootFound = true;
+                }
+            }
+        }
+
+        juce::String cleanStem = wavFile.getFileNameWithoutExtension()
+                                        .trim()
+                                        .retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ");
+        if (cleanStem.isEmpty())
+            cleanStem = "CUSTOM_WAV";
+
+        if (!rootFound)
+        {
+            int digitStart = cleanStem.length();
+            while (digitStart > 0 && juce::CharacterFunctions::isDigit(cleanStem[digitStart - 1]))
+                --digitStart;
+
+            if (digitStart < cleanStem.length() && digitStart > 0)
+            {
+                const int parsedNote = cleanStem.substring(digitStart).getIntValue();
+                if (parsedNote >= 0 && parsedNote <= 127)
+                {
+                    detectedRootNote = parsedNote;
+                    rootFound = true;
+                }
+            }
+        }
+
+        // 2. Loop Point & Zero-Crossing Detection
+        bool hasLoop = false;
+        int64_t lStart = 0;
+        int64_t lEnd   = 0;
+        SampleLoopMode loopMode = SampleLoopMode::PingPongLoop;
+
+        const int numLoops = meta.getValue("NumSampleLoops", "0").getIntValue();
+        if (numLoops > 0 || meta.containsKey("Loop0Start") || meta.containsKey("Loop0End"))
+        {
+            const int64_t rawStart = meta.getValue("Loop0Start", "0").getLargeIntValue();
+            const int64_t rawEnd   = meta.getValue("Loop0End", "0").getLargeIntValue();
+            const int rawType      = meta.getValue("Loop0Type", "0").getIntValue();
+
+            if (rawEnd > rawStart && rawEnd <= numSamples)
+            {
+                hasLoop = true;
+                lStart = std::clamp<int64_t>(rawStart, 0, numSamples - 1);
+                lEnd   = std::clamp<int64_t>(rawEnd, lStart + 1, numSamples);
+                loopMode = (rawType == 1) ? SampleLoopMode::PingPongLoop : SampleLoopMode::ForwardLoop;
+            }
+        }
+
+        if (!hasLoop)
+        {
+            lStart = static_cast<int64_t>(std::floor(numSamples * 0.40));
+            lEnd   = std::max<int64_t>(lStart + 1, static_cast<int64_t>(std::floor(numSamples * 0.95)));
+            loopMode = SampleLoopMode::PingPongLoop;
+        }
+
+        if (numSamples > 32)
+        {
+            lStart = snapToNearestZeroCrossing(tempBuffer, lStart, 1, std::max<int64_t>(1, numSamples - 16), 64);
+            lEnd   = snapToNearestZeroCrossing(tempBuffer, lEnd, std::min<int64_t>(numSamples - 2, lStart + 8), numSamples - 2, 64);
+            if (lEnd <= lStart)
+                lEnd = std::min<int64_t>(numSamples - 1, lStart + 1);
+        }
+
+        auto zone = std::make_shared<SampleZone>();
+        zone->instrumentName   = cleanStem;
+        zone->sourceFile       = wavFile;
+        zone->rootMidiNote     = detectedRootNote;
+        zone->lowMidiNote      = 0;
+        zone->highMidiNote     = 127;
+        zone->sourceSampleRate = (reader->sampleRate > 0.0) ? reader->sampleRate : 22050.0;
+        zone->audioData        = std::move(tempBuffer);
+        zone->hasHeaderLoop    = hasLoop;
+        zone->loopStartSample  = lStart;
+        zone->loopEndSample    = lEnd;
+        zone->defaultLoopMode  = loopMode;
+        zone->isLoaded.store(true, std::memory_order_release);
+
+        auto newGroup = std::make_shared<InstrumentGroup>();
+        newGroup->name = cleanStem;
+        newGroup->allZonesLoaded = true;
+        newGroup->zones.push_back(zone);
+
+        {
+            const juce::ScopedLock sl(bankLock);
+            customSlotGroups[static_cast<size_t>(slotIndex)] = std::move(newGroup);
+        }
+
+        saveLastCustomWavDirectory(wavFile.getParentDirectory());
+        return true;
+    }
+
+    const InstrumentGroup* getCustomSlotGroup(int slotIndex) const noexcept
+    {
+        if (slotIndex < 0 || slotIndex > 1)
+            return nullptr;
+        const juce::ScopedLock sl(bankLock);
+        return customSlotGroups[static_cast<size_t>(slotIndex)].get();
+    }
+
     juce::File getCurrentDirectory() const
     {
         const juce::ScopedLock sl(bankLock);
@@ -490,18 +658,35 @@ public:
 
     void saveStateToValueTree(juce::ValueTree& stateTree,
                               const juce::String& slotAInstrumentName,
-                              const juce::String& slotBInstrumentName) const
+                              const juce::String& slotBInstrumentName,
+                              bool isUsingCustomA,
+                              const juce::String& customPathA,
+                              bool isUsingCustomB,
+                              const juce::String& customPathB) const
     {
         juce::ValueTree bankNode = stateTree.getOrCreateChildWithName("CasioSampleBankState", nullptr);
         bankNode.setProperty("sampleFolderPath", getCurrentDirectory().getFullPathName(), nullptr);
         bankNode.setProperty("slotAInstrument", slotAInstrumentName, nullptr);
         bankNode.setProperty("slotBInstrument", slotBInstrumentName, nullptr);
+        bankNode.setProperty("isUsingCustomWavA", isUsingCustomA, nullptr);
+        bankNode.setProperty("customWavPathA", customPathA, nullptr);
+        bankNode.setProperty("isUsingCustomWavB", isUsingCustomB, nullptr);
+        bankNode.setProperty("customWavPathB", customPathB, nullptr);
     }
 
     void restoreStateFromValueTree(const juce::ValueTree& stateTree,
                                    juce::String& outSlotAInstrumentName,
-                                   juce::String& outSlotBInstrumentName)
+                                   juce::String& outSlotBInstrumentName,
+                                   bool& outIsUsingCustomA,
+                                   juce::String& outCustomPathA,
+                                   bool& outIsUsingCustomB,
+                                   juce::String& outCustomPathB)
     {
+        outIsUsingCustomA = false;
+        outCustomPathA.clear();
+        outIsUsingCustomB = false;
+        outCustomPathB.clear();
+
         const juce::ValueTree bankNode = stateTree.getChildWithName("CasioSampleBankState");
         if (bankNode.isValid())
         {
@@ -515,6 +700,10 @@ public:
 
             outSlotAInstrumentName = bankNode.getProperty("slotAInstrument", "").toString();
             outSlotBInstrumentName = bankNode.getProperty("slotBInstrument", "").toString();
+            outIsUsingCustomA      = static_cast<bool>(bankNode.getProperty("isUsingCustomWavA", false));
+            outCustomPathA         = bankNode.getProperty("customWavPathA", "").toString();
+            outIsUsingCustomB      = static_cast<bool>(bankNode.getProperty("isUsingCustomWavB", false));
+            outCustomPathB         = bankNode.getProperty("customWavPathB", "").toString();
         }
     }
 
@@ -613,6 +802,7 @@ private:
     juce::File currentDirectory;
     std::vector<InstrumentGroup> instrumentGroups;
     juce::StringArray instrumentNames;
+    std::array<std::shared_ptr<InstrumentGroup>, 2> customSlotGroups { nullptr, nullptr };
 };
 
 } // namespace CasioIXA
