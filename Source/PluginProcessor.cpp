@@ -610,10 +610,12 @@ void CasioCTK1000AudioProcessor::updateVoiceAndEffectParameters() noexcept
     auto fillSlotParams = [&](const juce::String& prefix,
                               CasioIXA::PCMSlotParameters& slotP,
                               int selectedInstIdx,
+                              bool useCustomWav,
                               bool forceEnableInDualMode)
     {
         const bool userEnable = apvts.getRawParameterValue(prefix + "ENABLE")->load() > 0.5f;
         slotP.enabled               = allowPCM && (userEnable || forceEnableInDualMode);
+        slotP.useCustomWave         = useCustomWav;
         slotP.instrumentIndex       = selectedInstIdx;
         slotP.level                 = apvts.getRawParameterValue(prefix + "LEVEL")->load();
         slotP.pan                   = apvts.getRawParameterValue(prefix + "PAN")->load();
@@ -635,8 +637,10 @@ void CasioCTK1000AudioProcessor::updateVoiceAndEffectParameters() noexcept
     };
 
     const bool isDualPcmMode = (crossMode == static_cast<int>(CrossSoundMode::DualPCM));
-    fillSlotParams("PCM_A_", currentVoiceParams.slotA, selectedSlotAIndex.load(), false);
-    fillSlotParams("PCM_B_", currentVoiceParams.slotB, selectedSlotBIndex.load(), isDualPcmMode);
+    fillSlotParams("PCM_A_", currentVoiceParams.slotA, selectedSlotAIndex.load(),
+                   isUsingCustomWavA.load() && !missingCustomWavA.load(), false);
+    fillSlotParams("PCM_B_", currentVoiceParams.slotB, selectedSlotBIndex.load(),
+                   isUsingCustomWavB.load() && !missingCustomWavB.load(), isDualPcmMode);
 
     // Update 8-Mode Semi-OBS DSP Effect parameters
     currentEffectParams.dspMode       = static_cast<CasioIXA::CTK1000DSPMode>(
@@ -804,6 +808,10 @@ void CasioCTK1000AudioProcessor::setSlotAInstrumentByIndex(int index)
         const int clamped = std::clamp(index, 0, numInst - 1);
         sampleBankManager.ensureInstrumentGroupLoaded(clamped);
         selectedSlotAIndex.store(clamped);
+        isUsingCustomWavA.store(false);
+        missingCustomWavA.store(false);
+        const juce::ScopedLock sl(customWavPathLock);
+        customWavPathA.clear();
     }
 }
 
@@ -815,6 +823,10 @@ void CasioCTK1000AudioProcessor::setSlotBInstrumentByIndex(int index)
         const int clamped = std::clamp(index, 0, numInst - 1);
         sampleBankManager.ensureInstrumentGroupLoaded(clamped);
         selectedSlotBIndex.store(clamped);
+        isUsingCustomWavB.store(false);
+        missingCustomWavB.store(false);
+        const juce::ScopedLock sl(customWavPathLock);
+        customWavPathB.clear();
     }
 }
 
@@ -825,6 +837,10 @@ void CasioCTK1000AudioProcessor::setSlotAInstrumentByName(const juce::String& na
     {
         sampleBankManager.ensureInstrumentGroupLoaded(idx);
         selectedSlotAIndex.store(idx);
+        isUsingCustomWavA.store(false);
+        missingCustomWavA.store(false);
+        const juce::ScopedLock sl(customWavPathLock);
+        customWavPathA.clear();
     }
 }
 
@@ -835,11 +851,86 @@ void CasioCTK1000AudioProcessor::setSlotBInstrumentByName(const juce::String& na
     {
         sampleBankManager.ensureInstrumentGroupLoaded(idx);
         selectedSlotBIndex.store(idx);
+        isUsingCustomWavB.store(false);
+        missingCustomWavB.store(false);
+        const juce::ScopedLock sl(customWavPathLock);
+        customWavPathB.clear();
     }
+}
+
+bool CasioCTK1000AudioProcessor::loadCustomWaveFileForSlot(int slotIndex, const juce::File& wavFile)
+{
+    if (slotIndex < 0 || slotIndex > 1)
+        return false;
+
+    const bool loadedOk = sampleBankManager.loadCustomWaveFileForSlot(slotIndex, wavFile);
+    {
+        const juce::ScopedLock sl(customWavPathLock);
+        if (slotIndex == 0)
+            customWavPathA = wavFile.getFullPathName();
+        else
+            customWavPathB = wavFile.getFullPathName();
+    }
+
+    if (slotIndex == 0)
+    {
+        isUsingCustomWavA.store(true);
+        missingCustomWavA.store(!loadedOk);
+    }
+    else
+    {
+        isUsingCustomWavB.store(true);
+        missingCustomWavB.store(!loadedOk);
+    }
+
+    return loadedOk;
+}
+
+bool CasioCTK1000AudioProcessor::isSlotUsingCustomWav(int slotIndex) const noexcept
+{
+    return (slotIndex == 0) ? isUsingCustomWavA.load() : isUsingCustomWavB.load();
+}
+
+bool CasioCTK1000AudioProcessor::isSlotCustomWavMissing(int slotIndex) const noexcept
+{
+    return (slotIndex == 0) ? missingCustomWavA.load() : missingCustomWavB.load();
+}
+
+juce::String CasioCTK1000AudioProcessor::getSlotCustomWavPath(int slotIndex) const
+{
+    const juce::ScopedLock sl(customWavPathLock);
+    return (slotIndex == 0) ? customWavPathA : customWavPathB;
+}
+
+juce::String CasioCTK1000AudioProcessor::getSlotDisplayLabel(int slotIndex) const
+{
+    if (isSlotUsingCustomWav(slotIndex))
+    {
+        if (isSlotCustomWavMissing(slotIndex))
+            return "MISSING WAV";
+
+        if (const auto* customGroup = sampleBankManager.getCustomSlotGroup(slotIndex))
+            return "USR: " + customGroup->name;
+
+        const juce::File f(getSlotCustomWavPath(slotIndex));
+        return "USR: " + f.getFileNameWithoutExtension();
+    }
+
+    const int idx = (slotIndex == 0) ? selectedSlotAIndex.load() : selectedSlotBIndex.load();
+    if (const auto* g = sampleBankManager.getInstrumentGroupByIndex(idx))
+        return g->name;
+    return {};
 }
 
 juce::String CasioCTK1000AudioProcessor::getSlotAInstrumentName() const
 {
+    if (isUsingCustomWavA.load())
+    {
+        if (missingCustomWavA.load())
+            return "MISSING WAV";
+        if (const auto* customA = sampleBankManager.getCustomSlotGroup(0))
+            return "USR_" + customA->name;
+    }
     if (const auto* g = sampleBankManager.getInstrumentGroupByIndex(selectedSlotAIndex.load()))
         return g->name;
     return {};
@@ -847,6 +938,13 @@ juce::String CasioCTK1000AudioProcessor::getSlotAInstrumentName() const
 
 juce::String CasioCTK1000AudioProcessor::getSlotBInstrumentName() const
 {
+    if (isUsingCustomWavB.load())
+    {
+        if (missingCustomWavB.load())
+            return "MISSING WAV";
+        if (const auto* customB = sampleBankManager.getCustomSlotGroup(1))
+            return "USR_" + customB->name;
+    }
     if (const auto* g = sampleBankManager.getInstrumentGroupByIndex(selectedSlotBIndex.load()))
         return g->name;
     return {};
@@ -878,7 +976,20 @@ juce::AudioProcessorEditor* CasioCTK1000AudioProcessor::createEditor()
 void CasioCTK1000AudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
     juce::ValueTree state = apvts.copyState();
-    sampleBankManager.saveStateToValueTree(state, getSlotAInstrumentName(), getSlotBInstrumentName());
+
+    juce::String bankAName, bankBName;
+    if (const auto* gA = sampleBankManager.getInstrumentGroupByIndex(selectedSlotAIndex.load()))
+        bankAName = gA->name;
+    if (const auto* gB = sampleBankManager.getInstrumentGroupByIndex(selectedSlotBIndex.load()))
+        bankBName = gB->name;
+
+    sampleBankManager.saveStateToValueTree(state,
+                                           bankAName,
+                                           bankBName,
+                                           isUsingCustomWavA.load(),
+                                           getSlotCustomWavPath(0),
+                                           isUsingCustomWavB.load(),
+                                           getSlotCustomWavPath(1));
 
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     if (xml != nullptr)
@@ -894,12 +1005,27 @@ void CasioCTK1000AudioProcessor::setStateInformation(const void* data, int sizeI
         apvts.replaceState(restoredTree);
 
         juce::String slotAName, slotBName;
-        sampleBankManager.restoreStateFromValueTree(restoredTree, slotAName, slotBName);
+        bool useCustomA = false, useCustomB = false;
+        juce::String pathA, pathB;
+
+        sampleBankManager.restoreStateFromValueTree(restoredTree,
+                                                    slotAName,
+                                                    slotBName,
+                                                    useCustomA,
+                                                    pathA,
+                                                    useCustomB,
+                                                    pathB);
 
         if (slotAName.isNotEmpty())
             setSlotAInstrumentByName(slotAName);
         if (slotBName.isNotEmpty())
             setSlotBInstrumentByName(slotBName);
+
+        if (useCustomA && pathA.isNotEmpty())
+            loadCustomWaveFileForSlot(0, juce::File(pathA));
+
+        if (useCustomB && pathB.isNotEmpty())
+            loadCustomWaveFileForSlot(1, juce::File(pathB));
     }
 }
 
