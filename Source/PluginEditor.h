@@ -416,7 +416,9 @@ public:
 private:
     void timerCallback() override;
     void openSampleFolderChooser();
+    void openCustomWaveChooserForSlot(int slotIndex);
     void refreshInstrumentComboBoxes();
+    void syncSlotComboBoxDisplay(int slotIndex);
     void syncUIScaleComboBoxToFactor(float scaleFactor);
 
     struct LabeledKnob
@@ -500,6 +502,7 @@ private:
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enableAttach;
 
         juce::ComboBox instrumentCombo;
+        juce::TextButton loadWaveBtn { "LOAD WAVE..." };
         juce::ComboBox loopModeCombo;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> loopModeAttach;
 
