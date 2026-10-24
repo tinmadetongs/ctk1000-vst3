@@ -100,8 +100,16 @@ CasioCTK1000AudioProcessorEditor::CasioCTK1000AudioProcessorEditor(CasioCTK1000A
                     processorRef.setSlotAInstrumentByIndex(selIdx);
                 else
                     processorRef.setSlotBInstrumentByIndex(selIdx);
+                mainCanvas.repaint(centerLedWindowBounds);
             }
         };
+
+        slot.loadWaveBtn.getProperties().set("royalBlue", true);
+        slot.loadWaveBtn.onClick = [this, isSlotA]
+        {
+            openCustomWaveChooserForSlot(isSlotA ? 0 : 1);
+        };
+        mainCanvas.addAndMakeVisible(slot.loadWaveBtn);
 
         slot.loopModeCombo.addItemList({ "One-Shot", "Forward Loop", "Ping-Pong (Pat.5,319,151)" }, 1);
         mainCanvas.addAndMakeVisible(slot.loopModeCombo);
@@ -433,6 +441,54 @@ void CasioCTK1000AudioProcessorEditor::openSampleFolderChooser()
     });
 }
 
+void CasioCTK1000AudioProcessorEditor::openCustomWaveChooserForSlot(int slotIndex)
+{
+    const juce::File startDir = processorRef.getSampleBankManager().getLastCustomWavDirectory();
+    const juce::String title = (slotIndex == 0)
+                             ? "Select Custom PCM .WAV File for Element A..."
+                             : "Select Custom PCM .WAV File for Element B...";
+
+    activeFileChooser = std::make_unique<juce::FileChooser>(title, startDir, "*.wav;*.WAV");
+
+    const auto chooserFlags = juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles;
+
+    activeFileChooser->launchAsync(chooserFlags, [this, slotIndex](const juce::FileChooser& fc)
+    {
+        const juce::File chosen = fc.getResult();
+        if (chosen.existsAsFile())
+        {
+            processorRef.loadCustomWaveFileForSlot(slotIndex, chosen);
+            syncSlotComboBoxDisplay(slotIndex);
+            mainCanvas.repaint();
+        }
+    });
+}
+
+void CasioCTK1000AudioProcessorEditor::syncSlotComboBoxDisplay(int slotIndex)
+{
+    auto& slot = (slotIndex == 0) ? pcmSlotA : pcmSlotB;
+    if (processorRef.isSlotUsingCustomWav(slotIndex))
+    {
+        const juce::String customLabel = processorRef.getSlotDisplayLabel(slotIndex);
+        slot.instrumentCombo.setSelectedId(0, juce::dontSendNotification);
+        slot.instrumentCombo.setTextWhenNothingSelected(customLabel);
+        slot.instrumentCombo.setText(customLabel, juce::dontSendNotification);
+    }
+    else
+    {
+        slot.instrumentCombo.setTextWhenNothingSelected("Select Wave...");
+        const int idx = (slotIndex == 0)
+                      ? processorRef.getSlotAInstrumentIndex()
+                      : processorRef.getSlotBInstrumentIndex();
+        if (idx >= 0 && idx < slot.instrumentCombo.getNumItems()
+            && slot.instrumentCombo.getSelectedItemIndex() != idx)
+        {
+            slot.instrumentCombo.setSelectedItemIndex(idx, juce::dontSendNotification);
+        }
+    }
+}
+
 void CasioCTK1000AudioProcessorEditor::refreshInstrumentComboBoxes()
 {
     const juce::StringArray names = processorRef.getAvailableInstrumentNames();
@@ -452,13 +508,8 @@ void CasioCTK1000AudioProcessorEditor::refreshInstrumentComboBoxes()
         pcmSlotB.instrumentCombo.addItem(itemLabel, i + 1);
     }
 
-    const int idxA = processorRef.getSlotAInstrumentIndex();
-    const int idxB = processorRef.getSlotBInstrumentIndex();
-
-    if (idxA >= 0 && idxA < names.size())
-        pcmSlotA.instrumentCombo.setSelectedItemIndex(idxA, juce::dontSendNotification);
-    if (idxB >= 0 && idxB < names.size())
-        pcmSlotB.instrumentCombo.setSelectedItemIndex(idxB, juce::dontSendNotification);
+    syncSlotComboBoxDisplay(0);
+    syncSlotComboBoxDisplay(1);
 
     if (curDir.exists() && curDir.isDirectory())
     {
@@ -476,18 +527,12 @@ void CasioCTK1000AudioProcessorEditor::timerCallback()
 {
     wavefolderScope.updateScope();
 
-    // Keep ComboBox selections synced if state was restored by the host DAW
-    const int hostIdxA = processorRef.getSlotAInstrumentIndex();
-    const int hostIdxB = processorRef.getSlotBInstrumentIndex();
-
+    // Keep ComboBox selections & custom WAV status synced if state was restored by the host DAW
     if (pcmSlotA.instrumentCombo.getNumItems() != processorRef.getAvailableInstrumentNames().size())
         refreshInstrumentComboBoxes();
 
-    if (pcmSlotA.instrumentCombo.getSelectedItemIndex() != hostIdxA)
-        pcmSlotA.instrumentCombo.setSelectedItemIndex(hostIdxA, juce::dontSendNotification);
-
-    if (pcmSlotB.instrumentCombo.getSelectedItemIndex() != hostIdxB)
-        pcmSlotB.instrumentCombo.setSelectedItemIndex(hostIdxB, juce::dontSendNotification);
+    syncSlotComboBoxDisplay(0);
+    syncSlotComboBoxDisplay(1);
 
     const double dt = 1.0 / 30.0;
     const double r1 = static_cast<double>(processorRef.getAPVTS().getRawParameterValue("LFO1_RATE")->load());
@@ -879,12 +924,14 @@ void CasioCTK1000AudioProcessorEditor::layoutCanvas()
         }
 
         auto topBar = inner.removeFromTop(24);
-        slot.enableBtn.setBounds(topBar.removeFromLeft(52));
-        topBar.removeFromLeft(6);
-        slot.instrumentCombo.setBounds(topBar.removeFromLeft(158));
-        topBar.removeFromLeft(6);
-        slot.loopModeCombo.setBounds(topBar.removeFromLeft(118));
-        topBar.removeFromLeft(6);
+        slot.enableBtn.setBounds(topBar.removeFromLeft(42));
+        topBar.removeFromLeft(4);
+        slot.instrumentCombo.setBounds(topBar.removeFromLeft(124));
+        topBar.removeFromLeft(4);
+        slot.loadWaveBtn.setBounds(topBar.removeFromLeft(78));
+        topBar.removeFromLeft(4);
+        slot.loopModeCombo.setBounds(topBar.removeFromLeft(94));
+        topBar.removeFromLeft(4);
         slot.loopOverrideBtn.setBounds(topBar);
 
         inner.removeFromTop(4);
